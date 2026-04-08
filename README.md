@@ -104,7 +104,6 @@ Os principais recursos que precisam ser nomeados são:
 - Usuários (Person)
 - Postagens (Activities / Objects)
 - Serviços (peers e super peers)
-- Caixas de entrada (inbox) e saída (outbox)
 - Relacionamentos (followers e following)
 - Recursos de mídia (imagens e links)
 
@@ -114,9 +113,7 @@ Todos esses recursos são identificados de forma global por meio de URLs únicas
 
 ### Qual esquema de nomeação?
 
-O sistema utiliza um esquema de nomeação estruturado e hierárquico baseado em URLs HTTP/HTTPS.
-
-Cada recurso possui um identificador global único, por exemplo:
+O sistema utiliza um esquema de nomeação estruturado e hierárquico baseado em URLs HTTP/HTTPS. Cada recurso possui um identificador global único, por exemplo:
 
 - `/users/{id}`
 - `/inbox`
@@ -142,33 +139,19 @@ Esse processo garante que um nome (URL) seja convertido no recurso correspondent
 
 ### Faz sentido usar threads?
 
-Sim. O uso de threads é adequado no sistema, pois permite:
-
-- Processar múltiplas requisições simultaneamente
-- Lidar com comunicação entre servidores (peer-to-peer)
-- Executar operações assíncronas, como envio e recebimento de mensagens
-
-Isso melhora o desempenho e a escalabilidade do sistema.
+Uma implementação onde cada thread gerencia uma conexão/cliente facilita a organização do código, ajuda no compartilhamento de recursos como variáveis globais e caminhos comuns de código, além de ser o padrão para servidores web para serviços sociais que não são baseados em interações em "tempo real" (como Streaming, Jogos, Bate-Papo); Mesmo não necessariamente aumentando a vazão do servidor, consideramos adequado para a aplicação o uso de threads.
 
 ---
 
 ### Servidores stateless ou stateful?
 
-O sistema adota predominantemente o modelo **stateless**.
-
-Cada requisição HTTP contém todas as informações necessárias para ser processada, sem depender de estado armazenado no servidor.
-
-O estado da aplicação (postagens, seguidores, interações) é mantido externamente em banco de dados, permitindo:
-
-- Escalabilidade
-- Distribuição entre múltiplos nós
-- Facilidade de balanceamento de carga
+Como não pretendemos manter conexões abertas após a resposta dos recursos necessários (comentários, imagens, postagens, etc.), esses recursos serão externamente guardados em um banco de dados acoplado a aplicação e as respostas não dependem de um estado específico, mas são comuns e reproduzíveis a todos os clientes, consideramos ideal o modelo **stateless**; Isso pode ajudar caso precisemos distribuir clientes entre diversos nós em situações de alta demanda e adição de novos servidores "clones" para balanceamento de carga.
 
 ---
 
 ### Faz sentido usar técnicas de virtualização?
 
-Sim. O uso de virtualização é adequado para o sistema, pois:
+Sim, consideramos adequado valer tanto vitualização de processos através de uma runtime da linguagem typescript para facilitar portabilidade e melhorar isolamento, quanto isolação de contâiner através do Docker, para padronizar o processo deployment em diferentes instãncias, distribuição do sistema, permitir reutilização de recursos do SO base e facilitar testes em nossos computadores.
 
 - Permite isolamento entre peers e super peers
 - Facilita a execução de múltiplos serviços em paralelo
