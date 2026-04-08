@@ -96,3 +96,83 @@ JSON
 - Suporte a criptografia de ponta a ponta <br>
 - Balanceamento de carga entre peers <br>
 - Deploy em containers (Docker)
+
+### Quais recursos precisam ser nomeados/identificados?
+
+Os principais recursos que precisam ser nomeados são:
+
+- Usuários (Person)
+- Postagens (Activities / Objects)
+- Serviços (peers e super peers)
+- Caixas de entrada (inbox) e saída (outbox)
+- Relacionamentos (followers e following)
+- Recursos de mídia (imagens e links)
+
+Todos esses recursos são identificados de forma global por meio de URLs únicas, seguindo o padrão do Activity Streams.
+
+---
+
+### Qual esquema de nomeação?
+
+O sistema utiliza um esquema de nomeação estruturado e hierárquico baseado em URLs HTTP/HTTPS.
+
+Cada recurso possui um identificador global único, por exemplo:
+
+- `/users/{id}`
+- `/inbox`
+- `/outbox`
+- `/followers`
+
+Esse modelo permite organização, escalabilidade e interoperabilidade entre diferentes serviços distribuídos.
+
+---
+
+### Qual mecanismo de resolução de nomes?
+
+A resolução de nomes ocorre em múltiplas camadas:
+
+- **DNS**: resolve o domínio para o endereço do servidor
+- **HTTP/HTTPS**: permite acessar o recurso através da URL
+- **Roteamento interno**: direciona a requisição para o serviço correto
+- **Banco de dados**: mapeia identificadores para os objetos reais
+
+Esse processo garante que um nome (URL) seja convertido no recurso correspondente no sistema distribuído.
+
+---
+
+### Faz sentido usar threads?
+
+Sim. O uso de threads é adequado no sistema, pois permite:
+
+- Processar múltiplas requisições simultaneamente
+- Lidar com comunicação entre servidores (peer-to-peer)
+- Executar operações assíncronas, como envio e recebimento de mensagens
+
+Isso melhora o desempenho e a escalabilidade do sistema.
+
+---
+
+### Servidores stateless ou stateful?
+
+O sistema adota predominantemente o modelo **stateless**.
+
+Cada requisição HTTP contém todas as informações necessárias para ser processada, sem depender de estado armazenado no servidor.
+
+O estado da aplicação (postagens, seguidores, interações) é mantido externamente em banco de dados, permitindo:
+
+- Escalabilidade
+- Distribuição entre múltiplos nós
+- Facilidade de balanceamento de carga
+
+---
+
+### Faz sentido usar técnicas de virtualização?
+
+Sim. O uso de virtualização é adequado para o sistema, pois:
+
+- Permite isolamento entre peers e super peers
+- Facilita a execução de múltiplos serviços em paralelo
+- Melhora a escalabilidade
+- Simplifica o processo de deploy
+
+Tecnologias como containers podem ser utilizadas para implementar essa abordagem.
