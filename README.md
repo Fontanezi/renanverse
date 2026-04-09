@@ -168,7 +168,7 @@ Sim. Em um ambiente de chat ou interação em tempo real, a ordem dos eventos é
 ---
 
 ### Será empregada exclusão mútua? Qual algoritmo?
-Sim, para a consistência de estados. Se o sistema permitir a criação de salas com nomes únicos ou limites de usuários, dois clientes podem tentar realizar a mesma ação simultaneamente. No estágio atual, um algoritmo centralizado é o mais adequado. O servidor Node.js atua como o coordenador que concede a "permissão" (lock) para a escrita no banco de dados ou alteração de estado da sala.
+Não. Posts e comentários podem usar timestamps do servidor + IDs ordenáveis (como ULIDs ou Snowflake IDs). Relógios lógicos fazem mais sentido se houver edição concorrente do mesmo recurso, o que raramente acontece em redes sociais.
 
 ---
 
