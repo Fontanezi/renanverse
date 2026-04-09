@@ -162,32 +162,25 @@ Tecnologias como containers podem ser utilizadas para implementar essa abordagem
 
 ---
 
-### TÓPICO 1
-Lorem
-
-
-- Topico
+### Será usado um mecanismo de sincronização?
+Sim. Em um ambiente de chat ou interação em tempo real, a ordem dos eventos é fundamental. Como o atraso de rede (latência) varia entre os usuários, uma mensagem enviada depois pode chegar antes ao servidor. Utilizaremos Relógios Lógicos (Timestamps): Em vez de confiar no horário do computador de cada usuário, o servidor atribui um número sequencial a cada evento. Isso garante que a "causalidade" seja respeitada (a resposta nunca aparece antes da pergunta).
 
 ---
 
-### TÓPICO 2
-Lorem
-
-
-- Topico
+### Será empregada exclusão mútua? Qual algoritmo?
+Sim, para a consistência de estados. Se o sistema permitir a criação de salas com nomes únicos ou limites de usuários, dois clientes podem tentar realizar a mesma ação simultaneamente. No estágio atual, um algoritmo centralizado é o mais adequado. O servidor Node.js atua como o coordenador que concede a "permissão" (lock) para a escrita no banco de dados ou alteração de estado da sala.
 
 ---
 
-### TÓPICO 3
-Lorem
-
-
-- Topico
+### Será necessário algoritmo de seleção? Qual?
+Não é estritamente necessário enquanto houver apenas um servidor backend (ponto único de falha). Com múltiplas instâncias do servidor para suportar mais usuários, precisaremos de um algoritmo de eleição (como o Bully Algorithm). Ele serviria para decidir qual das instâncias do servidor seria a responsável por tarefas críticas, como limpar salas inativas ou gerenciar logs globais.
 
 ---
 
-### TÓPICO 4
-Lorem
+### Usará PUB/SUB? Se sim, como será a implementação?
+Sim.
+- Implementação: Atualmente, o Socket.io simula isso através de rooms.
+- Publisher: O cliente que envia uma mensagem via socket.emit().
+- Subscriber: Todos os clientes que deram join na mesma sala e ouvem via socket.on().
 
-
-- Topico
+Para tornar o sistema verdadeiramente distribuído, a implementação deve usar um Redis Adapter. Isso permite que o "Pub/Sub" aconteça entre diferentes processos do servidor, garantindo que um usuário conectado ao "Servidor A" consiga falar com um usuário no "Servidor B".
