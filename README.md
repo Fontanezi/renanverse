@@ -184,3 +184,45 @@ Sim.
 - Subscriber: Todos os clientes que deram join na mesma sala e ouvem via socket.on().
 
 Para tornar o sistema verdadeiramente distribuído, a implementação deve usar um Redis Adapter. Isso permite que o "Pub/Sub" aconteça entre diferentes processos do servidor, garantindo que um usuário conectado ao "Servidor A" consiga falar com um usuário no "Servidor B".
+
+### Haverá replicação no projeto? Se sim, quais as consequências?
+
+Sim.
+- Utilizaremos replicação causal
+
+## Replicação e Consistência: Respostas para o Projeto Renanverse
+
+Com base nas diretrizes da disciplina **ACH2147**, mapeamos as respostas para as perguntas de discussão do quadro-negro adaptadas à arquitetura do **Renanverse**:
+
+---
+
+### Quais dados e/ou entidades serão replicados?
+No ecossistema do Renanverse, as entidades que precisam ser replicadas entre as instâncias são os objetos estruturados baseados no padrão **Activity Streams**:
+* **Postagens (Activities / Objects):** O conteúdo bruto gerado nas três plataformas (imagens do serviço de fotos, microblogs do sistema de texto e as submissões/votos do agregador de links).
+* **Metadados de Usuários (Person):** Perfis, avatares e chaves de identificação global necessários para renderizar corretamente as interações cruzadas (como menções).
+* **Relacionamentos e Interações:** Coleções de seguidores (`followers`), contas seguidas (`following`), além de curtidas e comentários associados a um post original.
+
+> **Nota de Implementação:** A replicação dessas entidades ocorrerá de forma assíncrona via HTTP POST (Servidor $\rightarrow$ Servidor) mediada pela coordenação dos **Super Peers**.
+
+---
+
+### Qual modelo de consistência adotado?
+O modelo adotado será o de **Consistência Causal (Causal Consistency)**, que enfraquece para **Consistência Eventual** para operações concorrentes não relacionadas.
+
+* **Justificativa:** Em redes sociais baseadas no Fediverse, operações que são causalmente relacionadas (como uma resposta a um post ou a exclusão de um comentário) precisam ser vistas na mesma ordem por todos os nós do sistema distributed. Se um usuário "A" posta algo e o usuário "B" responde, nenhum peer da rede pode exibir a resposta de "B" antes do post original de "A", pois isso quebraria a semântica da linha do tempo.
+
+---
+
+### Como distribuir as cópias? Estático ou dinâmico?
+A distribuição das cópias será **Dinâmica (baseada em demanda/inscrição)**.
+
+* **Justificativa:** Um modelo estático (onde todo peer armazena uma cópia absoluta de tudo de todos) destruiria a escalabilidade do sistema. Seguindo a filosofia do ActivityPub, as postagens serão replicadas dinamicamente com base nas listas de seguidores (`followers`). O dado de um post viaja estritamente em direção aos peers que hospedam usuários que ativamente assinaram (seguem) aquela conta de origem, otimizando o armazenamento e o tráfego de rede de forma reativa.
+
+---
+
+### Qual protocolo de consistência? Implementar ou usar uma biblioteca?
+Adotaremos uma **Implementação Própria** acoplada à nossa camada de aplicação.
+
+* **Mecanismo (Sequência Causal):** Implementaremos um protocolo baseado em **Relógios Lógicos (como Timestamps de Lamport ou Relógios Vetoriais)** embutidos no cabeçalho ou metadados JSON das mensagens (`Activity Streams`). 
+* **Funcionamento:** Cada post ou interação carrega o identificador e o contador de eventos do nó emissor. Ao receber uma atualização assíncrona, o peer de destino verifica se já processou todos os eventos precedentes. Caso uma resposta chegue antes do post original devido ao atraso de rede (latência), o evento fica em uma fila de espera local (`buffer`) e só é liberado para a linha do tempo do usuário quando a dependência causal for resolvida, garantindo o ordenamento histórico correto.
+*
