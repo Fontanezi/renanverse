@@ -211,3 +211,5 @@ Modelo **crash-recovery** (o nó retorna e se reintegra):
 5. **Snapshots/checkpoints (opcional):** snapshots periódicos do estado do BD para acelerar a restauração.
 
 FOCAR MAIS NA INFRAESTRUTURA (NOS SUPER PEERS, QUANTOS SUPER PEERS PODEM FALHAR???)
+FOCAR NA RESOLUÇÃO DE OMISSAO PRINCIPALMENTE E DEPOIS CRASH
+
