@@ -160,7 +160,7 @@ Foco em **crash** e **omissão**, com tratamento parcial de falhas **temporais**
 
 Fora de escopo (justificado no relatório):
 
-- **Falha de resposta** (corrompida/incorreta): mitigada por validação de schema JSON, mas não é foco.
+- **Falha de resposta** (corrompida/incorreta): mitigada por validação de schema JSON, mas não é foco. - ELABORAR FALHA DE RESPOSTA
 - **Falha bizantina** (nós maliciosos/arbitrários): BFT exige `3f+1` nós e é caro. Assume-se um modelo **fail-stop / crash-recovery** com peers cooperativos (não-adversariais). Defesa contra peers maliciosos (assinaturas HTTP, verificação de chave pública — já prevista no modelo `Person`) fica como extensão futura.
 
 ### Quantos processos falhantes suportados
