@@ -209,3 +209,5 @@ Modelo **crash-recovery** (o nó retorna e se reintegra):
 3. **Anti-entropy / catch-up:** um peer que volta após longa ausência puxa o que perdeu (ex.: lendo o `outbox` dos peers que segue a partir do último relógio lógico conhecido), fechando o gap de mensagens omitidas.
 4. **Recuperação de super peer:** se o líder cai, o **Bully** elege um novo; quando o antigo retorna, reentra como membro comum (ou dispara nova eleição, conforme a regra do Bully em que o nó de maior ID assume).
 5. **Snapshots/checkpoints (opcional):** snapshots periódicos do estado do BD para acelerar a restauração.
+
+FOCAR MAIS NA INFRAESTRUTURA (NOS SUPER PEERS, QUANTOS SUPER PEERS PODEM FALHAR???)
