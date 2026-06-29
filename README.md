@@ -1,6 +1,10 @@
 # Renanverse — Fediverse Reduzido
 
+João Fontanezi - 14747191 | Marcos Ruan - 14760209 | André Rocha - ;
+
 O **Renanverse** é um sistema distribuído que implementa um ecossistema social peer-to-peer inspirado no **Fediverse** e no protocolo **ActivityPub**. O objetivo é permitir a comunicação e a **replicação transparente** de dados entre diferentes serviços sociais, sobre uma arquitetura híbrida de **peers** e **super peers**.
+
+
 
 Três plataformas interoperáveis compõem a federação:
 
