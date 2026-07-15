@@ -1,0 +1,30 @@
+# Dependências
+node_modules/
+
+# Build
+dist/
+*.tsbuildinfo
+
+# Bancos SQLite de cada peer (dev.db, twitter.db, instagram.db, reddit.db, + WAL/SHM)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Variáveis de ambiente (cada app tem seu .env.example versionado, mas não o .env real)
+.env
+.env.*
+!.env.example
+
+# Logs
+npm-debug.log*
+*.log
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Postman (se exportar de novo, evite sobrescrever com dados sensíveis sem querer)
+*.postman_environment.local.json

@@ -1,0 +1,15 @@
+{
+  "name": "renanverse",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:twitter": "npm run dev -w apps/twitter",
+    "dev:instagram": "npm run dev -w apps/instagram",
+    "dev:reddit": "npm run dev -w apps/reddit",
+    "build": "npm run build -w packages/core && npm run build --workspaces --if-present"
+  }
+}
