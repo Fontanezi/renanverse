@@ -1,4 +1,4 @@
-import type { ZodType } from "zod";
+import type { ZodType, ZodTypeDef } from "zod";
 
 /**
  * Formato normalizado que a validação de cada app deve produzir,
@@ -32,6 +32,11 @@ export interface PlatformConfig {
    * Schema zod que valida e normaliza o body de POST /users/:id/outbox
    * para o formato ActivityInput. É AQUI que cada plataforma define suas
    * próprias regras (limite de caracteres, campos obrigatórios, etc).
+   *
+   * O terceiro parâmetro (tipo de entrada) é `unknown` de propósito: o schema
+   * recebe o body cru da requisição e o normaliza para ActivityInput. Sem isso,
+   * schemas com `.default()`/`.transform()` (cujo tipo de entrada torna alguns
+   * campos opcionais) não seriam atribuíveis a este campo.
    */
-  createActivitySchema: ZodType<ActivityInput>;
+  createActivitySchema: ZodType<ActivityInput, ZodTypeDef, unknown>;
 }
