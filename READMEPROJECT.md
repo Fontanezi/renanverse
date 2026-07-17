@@ -294,6 +294,35 @@ curl -s -X POST http://localhost:3001/users/${A##*/}/outbox \
 curl -s http://localhost:3002/users/${B##*/}/feed | jq
 ```
 
+## Testes de integração automatizados
+
+Dois roteiros em `scripts/` sobem a topologia inteira como processos filhos,
+exercitam o sistema de ponta a ponta e derrubam tudo no fim. Não dependem de
+serviço externo.
+
+```bash
+npm run smoke     # fluxo completo (super peers, Bully, quórum, vclock, pub/sub, activities)
+npm run interop   # interoperabilidade entre as 3 plataformas (via WebFinger)
+npm test          # roda os dois em sequência
+```
+
+- `scripts/smoke.mjs`: sobe 3 super peers e 2 peers de microblog e valida a
+  eleição Bully e o `leaderUrl`, o registro/descoberta por super peer, o follow
+  remoto por handle, a ordenação causal por relógio vetorial no feed, o pub/sub
+  (Socket.io) para seguidor local e remoto, `Update`/`Delete`/`Mention`/`Reject`,
+  `Like`/`Announce` sobre objeto alvo com `Undo`, o re-sync de diretório quando o
+  líder retorna, e o quórum 2k+1 (2 de 3 vivos commitam; 1 vivo recusa com 503).
+- `scripts/interop.mjs`: sobe Twitter, Instagram e Reddit e confirma que um post
+  de imagem (Instagram) e um de texto (Reddit) federam para o feed de um peer de
+  microblog, mais o endpoint de comunidade do Reddit.
+- `scripts/_harness.mjs`: utilitários compartilhados (subida/derrubada de
+  processos, chamadas HTTP, asserções).
+
+Requisitos: Node 20+ e `lsof` (usado para liberar as portas de execuções
+anteriores). Os bancos dos testes ficam em diretório temporário do sistema e são
+recriados a cada execução; as portas usadas são 3001-3003 (peers) e 4001-4003
+(super peers).
+
 ## Segurança (HTTP Signatures)
 
 `packages/core/src/httpsig.ts`. Cada peer tem um par RSA (gerado no primeiro

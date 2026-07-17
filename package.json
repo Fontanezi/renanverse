@@ -11,6 +11,13 @@
     "dev:instagram": "npm run dev -w apps/instagram",
     "dev:reddit": "npm run dev -w apps/reddit",
     "dev:superpeer": "npm run dev -w apps/superpeer",
-    "build": "npm run build -w packages/core && npm run build --workspaces --if-present"
+    "build": "npm run build -w packages/core && npm run build --workspaces --if-present",
+    "smoke": "node scripts/smoke.mjs",
+    "interop": "node scripts/interop.mjs",
+    "test": "npm run smoke && npm run interop"
+  },
+  "devDependencies": {
+    "socket.io-client": "^4.7.5",
+    "tsx": "^4.16.2"
   }
 }
