@@ -12,6 +12,7 @@
 import type { Database } from "better-sqlite3";
 import { ulid } from "ulid";
 import { buildSignatureHeaders } from "./httpsig";
+import { publishActivityToFollowers } from "./realtime";
 import type { PlatformConfig } from "./types";
 
 const MAX_ATTEMPTS = 10;
@@ -468,7 +469,7 @@ export function processIncoming(db: Database, config: PlatformConfig, body: any)
   // Conteúdo: aplica a regra causal por vclock (§6.6).
   const local = getVClock(db);
   if (isDeliverable(local, _meta.vclock, _meta.origin)) {
-    applyContent(db, wire);
+    applyContent(db, config, wire);
     mergeVClock(db, _meta.vclock);
     markProcessed(db, _meta.msgId);
     reevaluateBuffer(db, config);
@@ -566,7 +567,7 @@ function handleUndo(db: Database, config: PlatformConfig, activity: any): Incomi
 }
 
 /** Aplica uma Activity de conteúdo (após passar pela ordenação causal). */
-function applyContent(db: Database, wire: Wire): void {
+function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
   const { activity, _meta } = wire;
   const object = activity.object ?? {};
 
@@ -583,12 +584,16 @@ function applyContent(db: Database, wire: Wire): void {
       JSON.stringify(wire),
       object.id ?? activity.object?.id ?? activity.id
     );
+    // Pub/Sub: notifica os seguidores locais da edição.
+    publishActivityToFollowers(db, config, activity.actor, "feed:update", activity);
     return;
   }
 
   if (activity.type === "Delete") {
     const targetUri = typeof object === "string" ? object : object.id ?? activity.id;
     db.prepare("DELETE FROM activity WHERE uri = ?").run(targetUri);
+    // Pub/Sub: notifica os seguidores locais da remoção (tombstone).
+    publishActivityToFollowers(db, config, activity.actor, "feed:delete", { id: targetUri, actor: activity.actor });
     return;
   }
 
@@ -613,6 +618,9 @@ function applyContent(db: Database, wire: Wire): void {
     activity.published ?? _meta.ts ?? new Date().toISOString(),
     JSON.stringify(wire)
   );
+
+  // Pub/Sub: entrega em tempo real ao feed dos seguidores locais deste ator.
+  publishActivityToFollowers(db, config, activity.actor, "feed:activity", activity);
 }
 
 /**
@@ -713,7 +721,7 @@ function reevaluateBuffer(db: Database, config: PlatformConfig): void {
       const wire = JSON.parse(r.payload) as Wire;
       if (isDeliverable(getVClock(db), wire._meta.vclock, wire._meta.origin)) {
         db.prepare("DELETE FROM inbox_buffer WHERE id = ?").run(r.id);
-        applyContent(db, wire);
+        applyContent(db, config, wire);
         mergeVClock(db, wire._meta.vclock);
         markProcessed(db, wire._meta.msgId);
         console.log(`[${config.peerId}] ${wire.activity.type} ${r.msgId} liberado do buffer`);
@@ -737,7 +745,7 @@ function sweepBuffer(db: Database, config: PlatformConfig): void {
   for (const s of stale) {
     const wire = JSON.parse(s.payload) as Wire;
     db.prepare("DELETE FROM inbox_buffer WHERE id = ?").run(s.id);
-    applyContent(db, wire);
+    applyContent(db, config, wire);
     mergeVClock(db, wire._meta.vclock);
     markProcessed(db, wire._meta.msgId);
     console.warn(`[${config.peerId}] ${wire.activity.type} ${s.msgId} aplicado por timeout de buffer`);

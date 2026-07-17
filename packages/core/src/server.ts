@@ -1,10 +1,12 @@
 import express, { type Express } from "express";
+import { createServer } from "http";
 import { createDb } from "./db";
 import { createUsersRouter } from "./routes/users";
 import { createInboxRouter } from "./routes/inbox";
 import { createWebfingerRouter } from "./routes/webfinger";
 import { startFederation } from "./federation";
 import { startRegistration } from "./registry";
+import { initRealtime } from "./realtime";
 import { ensureKeyPair } from "./httpsig";
 import type { PlatformConfig } from "./types";
 
@@ -51,7 +53,11 @@ export function createApp(config: PlatformConfig): Express {
 /** Sobe o servidor HTTP na porta da config. Usado pelo index.ts de cada app. */
 export function startApp(config: PlatformConfig): void {
   const app = createApp(config);
-  app.listen(config.port, () => {
+  // Socket.io precisa do http.Server "cru" (não do app Express direto), então
+  // criamos o servidor explicitamente e acoplamos o pub/sub a ele.
+  const httpServer = createServer(app);
+  initRealtime(httpServer, config);
+  httpServer.listen(config.port, () => {
     console.log(`[${config.displayName}] peer "${config.peerId}" rodando em ${config.baseUrl} (porta ${config.port})`);
   });
 }

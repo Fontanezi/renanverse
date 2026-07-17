@@ -23,6 +23,7 @@ import {
   catchupSince,
 } from "../federation";
 import { resolveHandle } from "../registry";
+import { publishActivityToFollowers } from "../realtime";
 import { publicKeyPem } from "../httpsig";
 import type { PlatformConfig } from "../types";
 
@@ -179,6 +180,9 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       id
     );
     fanOutToFollowers(db, wire);
+
+    // Pub/Sub: avisa em tempo real os seguidores LOCAIS deste ator (feed).
+    publishActivityToFollowers(db, config, actor, "feed:activity", as2);
 
     res.status(201).json(as2);
   });
