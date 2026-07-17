@@ -1,13 +1,13 @@
-// Camada de federação servidor -> servidor (Fase 2 do READMEPROJECT).
+// Camada de federação servidor -> servidor.
 //
-// Responsabilidades:
-//   1. Relógio lógico de Lamport por peer (kv).
-//   2. Outbox durável + dispatcher: entrega at-least-once com retry/backoff.
-//   3. Processamento de inbox: dedup por URI e buffer causal (hold-back) para
-//      Activities que chegam antes da dependência (inReplyTo).
+// Implementa o que o relatório (README.md, §3 e §6.6) descreve:
+//   - Envelope de controle `_meta` { msgId, origin, vclock, inReplyTo, ts }.
+//   - Relógio VETORIAL por peer (chaveado pela origem = baseUrl do peer).
+//   - Entrega at-least-once com outbox durável, retry/backoff e assinatura.
+//   - Recepção com deduplicação por `msgId` e ordenação causal por vclock
+//     (regra §6.6), com buffer de hold-back e sweeper de disponibilidade.
 //
-// Tudo isto é compartilhado pelos 3 apps sem alteração — quem varia é só a
-// validação/`meta` de cada plataforma, definida no PlatformConfig.
+// Compartilhado pelos 3 apps sem alteração.
 
 import type { Database } from "better-sqlite3";
 import { ulid } from "ulid";
@@ -23,10 +23,37 @@ const BUFFER_SWEEP_INTERVAL_MS = 5000;
 const BUFFER_MAX_WAIT_MS = 30000;
 
 // ---------------------------------------------------------------------------
-// Relógio lógico de Lamport
+// Tipos do wire
 // ---------------------------------------------------------------------------
 
-/** Lê o valor atual do relógio de Lamport deste peer. */
+export type VClock = Record<string, number>;
+
+export interface MetaEnvelope {
+  msgId: string;
+  origin: string;
+  vclock: VClock;
+  inReplyTo: string | null;
+  ts: string;
+}
+
+export interface Wire {
+  activity: any;
+  _meta: MetaEnvelope;
+}
+
+/** Origem (baseUrl) de um ator local a partir da sua URI. */
+function originOf(uri: string): string {
+  try {
+    return new URL(uri).origin;
+  } catch {
+    return uri.replace(/\/users\/.*$/, "");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Relógio lógico de Lamport (ordenação do feed) — mantido junto do vetorial
+// ---------------------------------------------------------------------------
+
 export function currentLamport(db: Database): number {
   const row = db.prepare("SELECT value FROM kv WHERE key = 'lamport'").get() as
     | { value: string }
@@ -40,14 +67,12 @@ function setLamport(db: Database, value: number): void {
   ).run(String(value));
 }
 
-/** Evento local: incrementa e devolve o novo tempo lógico. */
 export function nextLamport(db: Database): number {
   const next = currentLamport(db) + 1;
   setLamport(db, next);
   return next;
 }
 
-/** Evento de recepção: avança o relógio para max(local, recebido) + 1. */
 export function observeLamport(db: Database, received: number): number {
   const next = Math.max(currentLamport(db), received) + 1;
   setLamport(db, next);
@@ -55,29 +80,104 @@ export function observeLamport(db: Database, received: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// Relógio VETORIAL (§6.6) — chaveado pela origem (baseUrl) de cada peer
+// ---------------------------------------------------------------------------
+
+export function getVClock(db: Database): VClock {
+  const row = db.prepare("SELECT value FROM kv WHERE key = 'vclock'").get() as
+    | { value: string }
+    | undefined;
+  if (!row) return {};
+  try {
+    return JSON.parse(row.value) as VClock;
+  } catch {
+    return {};
+  }
+}
+
+function setVClock(db: Database, vc: VClock): void {
+  db.prepare(
+    "INSERT INTO kv (key, value) VALUES ('vclock', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value"
+  ).run(JSON.stringify(vc));
+}
+
+/** Evento local: incrementa o próprio componente e devolve uma cópia. */
+function tickVClock(db: Database, selfOrigin: string): VClock {
+  const vc = getVClock(db);
+  vc[selfOrigin] = (vc[selfOrigin] ?? 0) + 1;
+  setVClock(db, vc);
+  return { ...vc };
+}
+
+/** Merge na recepção: Vlocal[k] = max(Vlocal[k], Vm[k]) para todo k. */
+function mergeVClock(db: Database, incoming: VClock): void {
+  const vc = getVClock(db);
+  for (const [k, v] of Object.entries(incoming)) {
+    vc[k] = Math.max(vc[k] ?? 0, v);
+  }
+  setVClock(db, vc);
+}
+
+/**
+ * Regra de entregabilidade causal do relatório (§6.6): uma mensagem da origem
+ * `j` com relógio `Vm` é entregável quando
+ *   Vm[j] == Vlocal[j] + 1   e   Vm[k] <= Vlocal[k]  para todo k != j.
+ */
+function isDeliverable(local: VClock, vm: VClock, origin: string): boolean {
+  if ((vm[origin] ?? 0) !== (local[origin] ?? 0) + 1) return false;
+  for (const [k, v] of Object.entries(vm)) {
+    if (k === origin) continue;
+    if (v > (local[k] ?? 0)) return false;
+  }
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Envelope
+// ---------------------------------------------------------------------------
+
+/** Envolve uma Activity AS2 no envelope `_meta`, incrementando o vclock. */
+export function wrap(db: Database, activity: any, inReplyTo?: string | null): Wire {
+  const origin = originOf(activity.actor);
+  return {
+    activity,
+    _meta: {
+      msgId: ulid(),
+      origin,
+      vclock: tickVClock(db, origin),
+      inReplyTo: inReplyTo ?? null,
+      ts: new Date().toISOString(),
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Entrega (outbox durável)
 // ---------------------------------------------------------------------------
 
-/** Deriva a URL de inbox de um ator a partir da sua URI. */
 export function inboxUrlForActor(actorUri: string): string {
   return `${actorUri.replace(/\/$/, "")}/inbox`;
 }
 
-/**
- * Enfileira uma entrega na outbox durável. Idempotente por (targetInbox,
- * activityUri): reenfileirar a mesma Activity para o mesmo destino é no-op.
- */
+/** Enfileira uma entrega. Idempotente por (targetInbox, msgId). */
 export function enqueueDelivery(
   db: Database,
   targetInbox: string,
-  activityUri: string,
-  payload: unknown
+  msgId: string,
+  wire: Wire
 ): void {
   db.prepare(
     `INSERT OR IGNORE INTO delivery
        (id, targetInbox, activityUri, payload, status, attempts, nextAttemptAt, createdAt)
      VALUES (?, ?, ?, ?, 'PENDING', 0, ?, ?)`
-  ).run(ulid(), targetInbox, activityUri, JSON.stringify(payload), new Date().toISOString(), new Date().toISOString());
+  ).run(
+    ulid(),
+    targetInbox,
+    msgId,
+    JSON.stringify(wire),
+    new Date().toISOString(),
+    new Date().toISOString()
+  );
 }
 
 interface DeliveryRow {
@@ -96,8 +196,7 @@ function backoffMs(attempts: number): number {
   return Math.min(30000, 2 ** attempts * 500);
 }
 
-/** Processa um lote de entregas pendentes já vencidas. */
-async function dispatchPending(db: Database, config: PlatformConfig): Promise<void> {
+async function dispatchPending(db: Database): Promise<void> {
   const now = new Date().toISOString();
   const due = db
     .prepare(
@@ -107,11 +206,11 @@ async function dispatchPending(db: Database, config: PlatformConfig): Promise<vo
 
   for (const d of due) {
     try {
-      // Assina a entrega (HTTP Signatures). O ator do payload é sempre local a
-      // este peer, então assinamos com a chave privada do peer.
+      // Assina a entrega (HTTP Signatures) com a chave do peer; o ator fica
+      // dentro do envelope, em activity.actor, e é sempre local a este peer.
       let sigHeaders: Record<string, string> = {};
       try {
-        const actor = JSON.parse(d.payload)?.actor;
+        const actor = JSON.parse(d.payload)?.activity?.actor;
         if (typeof actor === "string") {
           sigHeaders = buildSignatureHeaders(db, actor, d.targetInbox, d.payload);
         }
@@ -152,77 +251,75 @@ function registerFailure(db: Database, d: DeliveryRow, error: string): void {
   }
 }
 
+/** Extrai as URIs de atores mencionados (tag Mention) de uma Activity. */
+function mentionTargets(activity: any): string[] {
+  const tags = activity?.object?.tag;
+  if (!Array.isArray(tags)) return [];
+  return tags
+    .filter((t) => t && t.type === "Mention" && typeof t.href === "string")
+    .map((t) => t.href as string);
+}
+
 /**
- * Fan-out na escrita: replica uma Activity local para as inboxes de todos os
- * seguidores do ator. A entrega em si é assíncrona (dispatcher).
+ * Fan-out na escrita: replica o envelope para as inboxes de todos os seguidores
+ * do ator e dos atores mencionados (§3, Mention). Entrega assíncrona.
  */
-export function fanOutToFollowers(db: Database, actorUri: string, activityAS2: { id: string }): void {
+export function fanOutToFollowers(db: Database, wire: Wire): void {
+  const actorUri = wire.activity.actor as string;
+  const targets = new Set<string>();
+
   const followers = db
     .prepare("SELECT followerActorUri FROM follow WHERE followeeActorUri = ?")
     .all(actorUri) as { followerActorUri: string }[];
+  for (const f of followers) targets.add(inboxUrlForActor(f.followerActorUri));
 
-  for (const f of followers) {
-    enqueueDelivery(db, inboxUrlForActor(f.followerActorUri), activityAS2.id, activityAS2);
+  for (const mentioned of mentionTargets(wire.activity)) {
+    if (originOf(mentioned) !== originOf(actorUri)) targets.add(inboxUrlForActor(mentioned));
   }
+
+  for (const inbox of targets) enqueueDelivery(db, inbox, wire._meta.msgId, wire);
 }
 
-/** Envia um Follow para a inbox do ator remoto que se deseja seguir. */
-export function sendFollow(
-  db: Database,
-  followerUri: string,
-  followeeUri: string
-): void {
-  const lamport = nextLamport(db);
-  const activityUri = `${followerUri}/follows/${ulid()}`;
-  const payload = {
+/** Envia um Follow (envelopado) para a inbox do ator remoto que se quer seguir. */
+export function sendFollow(db: Database, followerUri: string, followeeUri: string): void {
+  const activity = {
     "@context": ["https://www.w3.org/ns/activitystreams"],
-    id: activityUri,
+    id: `${followerUri}/follows/${ulid()}`,
     type: "Follow",
     actor: followerUri,
     object: followeeUri,
-    _lamportClock: lamport,
   };
-  enqueueDelivery(db, inboxUrlForActor(followeeUri), activityUri, payload);
+  const wire = wrap(db, activity);
+  enqueueDelivery(db, inboxUrlForActor(followeeUri), wire._meta.msgId, wire);
 }
 
-/**
- * Monta uma Activity `Undo` AS2 envolvendo o objeto original (o Follow/Like/
- * Announce que se está desfazendo). Recebe um id próprio e estampa o Lamport.
- */
-export function buildUndo(
-  db: Database,
-  actorUri: string,
-  inner: Record<string, unknown>
-): { id: string; type: "Undo"; actor: string; object: Record<string, unknown>; _lamportClock: number } {
-  return {
+/** Monta um `Undo` envelopado envolvendo o objeto original (Follow/Like/Announce). */
+export function buildUndo(db: Database, actorUri: string, inner: Record<string, unknown>): Wire {
+  const activity = {
     "@context": ["https://www.w3.org/ns/activitystreams"],
     id: `${actorUri}/undo/${ulid()}`,
     type: "Undo",
     actor: actorUri,
     object: inner,
-    _lamportClock: nextLamport(db),
-  } as any;
+  };
+  return wrap(db, activity);
 }
 
 /** Federa um Unfollow (Undo{Follow}) para a inbox do ator seguido. */
-export function sendUnfollow(
-  db: Database,
-  followerUri: string,
-  followeeUri: string
-): void {
-  const undo = buildUndo(db, followerUri, {
+export function sendUnfollow(db: Database, followerUri: string, followeeUri: string): void {
+  const wire = buildUndo(db, followerUri, {
     type: "Follow",
     actor: followerUri,
     object: followeeUri,
   });
-  enqueueDelivery(db, inboxUrlForActor(followeeUri), undo.id, undo);
+  enqueueDelivery(db, inboxUrlForActor(followeeUri), wire._meta.msgId, wire);
 }
 
 // ---------------------------------------------------------------------------
-// Recepção (inbox real)
+// Recepção (inbox)
 // ---------------------------------------------------------------------------
 
-const KNOWN_OBJECT_KEYS = new Set(["type", "content", "attachment", "inReplyTo"]);
+const KNOWN_OBJECT_KEYS = new Set(["type", "content", "attachment", "inReplyTo", "id", "attributedTo", "tag"]);
 
 function extractMeta(object: Record<string, unknown> | undefined): string | null {
   if (!object || typeof object !== "object") return null;
@@ -234,51 +331,98 @@ function extractMeta(object: Record<string, unknown> | undefined): string | null
 }
 
 export interface IncomingResult {
-  status: "applied" | "buffered" | "duplicate" | "follow" | "accept" | "undo" | "ignored";
+  status: "applied" | "buffered" | "duplicate" | "follow" | "accept" | "reject" | "undo" | "ignored";
   detail?: string;
 }
 
-/**
- * Processa uma Activity que chegou na inbox deste peer, vinda de outro peer.
- * Trata Follow/Accept e conteúdo (Create/Like/Announce) com dedup e buffer
- * causal. É o coração da Fase 2.
- */
-export function processIncoming(
-  db: Database,
-  config: PlatformConfig,
-  body: any
-): IncomingResult {
-  if (!body || typeof body !== "object" || typeof body.type !== "string") {
-    return { status: "ignored", detail: "corpo sem 'type'" };
-  }
+const CONTENT_TYPES = new Set(["Create", "Update", "Delete", "Like", "Announce"]);
 
-  observeLamport(db, typeof body._lamportClock === "number" ? body._lamportClock : 0);
-
-  switch (body.type) {
-    case "Follow":
-      return handleFollow(db, config, body);
-    case "Accept":
-      console.log(`[${config.peerId}] Follow aceito por`, body.actor);
-      return { status: "accept" };
-    case "Undo":
-      return handleUndo(db, config, body);
-    case "Create":
-    case "Like":
-    case "Announce":
-      return handleContent(db, config, body);
-    default:
-      console.log(`[${config.peerId}] Activity ignorada (tipo ${body.type})`);
-      return { status: "ignored", detail: `tipo ${body.type}` };
-  }
+/** Normaliza o corpo recebido em { activity, _meta }, tolerando ausência de _meta. */
+function toWire(body: any): Wire | null {
+  if (!body || typeof body !== "object") return null;
+  const activity = body.activity ?? body;
+  if (!activity || typeof activity.type !== "string") return null;
+  const meta: MetaEnvelope = body._meta ?? {
+    msgId: activity.id ?? ulid(),
+    origin: originOf(activity.actor ?? ""),
+    vclock: {},
+    inReplyTo: activity?.object?.inReplyTo ?? null,
+    ts: new Date().toISOString(),
+  };
+  return { activity, _meta: meta };
 }
 
-function handleFollow(db: Database, config: PlatformConfig, body: any): IncomingResult {
-  const followerUri: string | undefined = body.actor;
-  const followeeUri: string | undefined =
-    typeof body.object === "string" ? body.object : body.object?.id;
-  if (!followerUri || !followeeUri) {
-    return { status: "ignored", detail: "Follow sem actor/object" };
+function alreadyProcessed(db: Database, msgId: string): boolean {
+  return !!db.prepare("SELECT 1 FROM processed_msg WHERE msgId = ?").get(msgId);
+}
+
+function markProcessed(db: Database, msgId: string): void {
+  db.prepare("INSERT OR IGNORE INTO processed_msg (msgId, at) VALUES (?, ?)").run(
+    msgId,
+    new Date().toISOString()
+  );
+}
+
+/**
+ * Processa uma entrega recebida de outro peer. Deduplica por `_meta.msgId`,
+ * despacha por tipo e aplica a ordenação causal por vclock ao conteúdo.
+ */
+export function processIncoming(db: Database, config: PlatformConfig, body: any): IncomingResult {
+  const wire = toWire(body);
+  if (!wire) return { status: "ignored", detail: "corpo invalido" };
+
+  const { activity, _meta } = wire;
+
+  if (alreadyProcessed(db, _meta.msgId)) return { status: "duplicate" };
+
+  // Controle (Follow/Accept/Reject/Undo): processa imediatamente, sem hold-back.
+  switch (activity.type) {
+    case "Follow":
+      return finishControl(db, _meta, handleFollow(db, config, activity));
+    case "Accept":
+      console.log(`[${config.peerId}] Follow aceito por`, activity.actor);
+      return finishControl(db, _meta, { status: "accept" });
+    case "Reject":
+      return finishControl(db, _meta, handleReject(db, config, activity));
+    case "Undo":
+      return finishControl(db, _meta, handleUndo(db, config, activity));
   }
+
+  if (!CONTENT_TYPES.has(activity.type)) {
+    return { status: "ignored", detail: `tipo ${activity.type}` };
+  }
+
+  // Conteúdo: aplica a regra causal por vclock (§6.6).
+  const local = getVClock(db);
+  if (isDeliverable(local, _meta.vclock, _meta.origin)) {
+    applyContent(db, wire);
+    mergeVClock(db, _meta.vclock);
+    markProcessed(db, _meta.msgId);
+    reevaluateBuffer(db, config);
+    return { status: "applied" };
+  }
+
+  // Fora de ordem: segura no buffer causal até o Vlocal avançar.
+  db.prepare(
+    `INSERT OR IGNORE INTO inbox_buffer (id, msgId, origin, payload, receivedAt)
+     VALUES (?, ?, ?, ?, ?)`
+  ).run(ulid(), _meta.msgId, _meta.origin, JSON.stringify(wire), new Date().toISOString());
+  console.log(`[${config.peerId}] ${activity.type} ${_meta.msgId} em buffer (vclock fora de ordem)`);
+  return { status: "buffered" };
+}
+
+/** Finaliza uma mensagem de controle: merge do vclock + marca processada. */
+function finishControl(db: Database, meta: MetaEnvelope, result: IncomingResult): IncomingResult {
+  mergeVClock(db, meta.vclock);
+  markProcessed(db, meta.msgId);
+  return result;
+}
+
+function handleFollow(db: Database, config: PlatformConfig, activity: any): IncomingResult {
+  const followerUri: string | undefined = activity.actor;
+  const followeeUri: string | undefined =
+    typeof activity.object === "string" ? activity.object : activity.object?.id;
+  if (!followerUri || !followeeUri) return { status: "ignored", detail: "Follow sem actor/object" };
 
   db.prepare(
     `INSERT OR IGNORE INTO follow (id, followerActorUri, followeeActorUri, createdAt)
@@ -286,53 +430,57 @@ function handleFollow(db: Database, config: PlatformConfig, body: any): Incoming
   ).run(ulid(), followerUri, followeeUri, new Date().toISOString());
 
   // Auto-accept: confirma o follow de volta para a inbox do seguidor.
-  const acceptUri = `${followeeUri}/accepts/${ulid()}`;
-  enqueueDelivery(db, inboxUrlForActor(followerUri), acceptUri, {
+  const accept = {
     "@context": ["https://www.w3.org/ns/activitystreams"],
-    id: acceptUri,
+    id: `${followeeUri}/accepts/${ulid()}`,
     type: "Accept",
     actor: followeeUri,
     object: { type: "Follow", actor: followerUri, object: followeeUri },
-    _lamportClock: nextLamport(db),
-  });
+  };
+  const wire = wrap(db, accept);
+  enqueueDelivery(db, inboxUrlForActor(followerUri), wire._meta.msgId, wire);
 
   console.log(`[${config.peerId}] novo seguidor remoto: ${followerUri} -> ${followeeUri}`);
   return { status: "follow" };
 }
 
-/**
- * Trata um Undo recebido. Despacha pelo tipo do objeto interno:
- *  - Undo{Follow}: remove a relação de follow (o seguidor deixa de seguir);
- *  - Undo{Like|Announce}: remove a Activity referenciada (por uri).
- * DELETE é idempotente, então reentregas do Undo são inofensivas (sem dedup).
- */
-function handleUndo(db: Database, config: PlatformConfig, body: any): IncomingResult {
-  const inner = body.object;
-  if (!inner || typeof inner !== "object") {
-    return { status: "ignored", detail: "Undo sem object" };
+/** Reject de um Follow: remove o follow que havíamos registrado otimisticamente. */
+function handleReject(db: Database, config: PlatformConfig, activity: any): IncomingResult {
+  const rejecter: string | undefined = activity.actor;
+  const inner = activity.object;
+  const followerUri: string | undefined =
+    inner?.actor ?? (typeof inner === "string" ? undefined : inner?.follower);
+  if (rejecter && followerUri) {
+    db.prepare("DELETE FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?").run(
+      followerUri,
+      rejecter
+    );
+    console.log(`[${config.peerId}] Follow rejeitado por ${rejecter}`);
   }
+  return { status: "reject" };
+}
+
+function handleUndo(db: Database, config: PlatformConfig, activity: any): IncomingResult {
+  const inner = activity.object;
+  if (!inner || typeof inner !== "object") return { status: "ignored", detail: "Undo sem object" };
 
   if (inner.type === "Follow") {
-    const followerUri: string | undefined = inner.actor ?? body.actor;
+    const followerUri: string | undefined = inner.actor ?? activity.actor;
     const followeeUri: string | undefined =
       typeof inner.object === "string" ? inner.object : inner.object?.id;
-    if (!followerUri || !followeeUri) {
-      return { status: "ignored", detail: "Undo{Follow} sem actor/object" };
-    }
-    db.prepare(
-      "DELETE FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?"
-    ).run(followerUri, followeeUri);
+    if (!followerUri || !followeeUri) return { status: "ignored", detail: "Undo{Follow} incompleto" };
+    db.prepare("DELETE FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?").run(
+      followerUri,
+      followeeUri
+    );
     console.log(`[${config.peerId}] unfollow: ${followerUri} deixou de seguir ${followeeUri}`);
     return { status: "undo" };
   }
 
   if (inner.type === "Like" || inner.type === "Announce") {
-    // A Activity original foi guardada com uri = id do Like/Announce.
     const targetUri: string | undefined =
       inner.id ?? (typeof inner.object === "string" ? inner.object : undefined);
-    if (!targetUri) {
-      return { status: "ignored", detail: `Undo{${inner.type}} sem id do alvo` };
-    }
+    if (!targetUri) return { status: "ignored", detail: `Undo{${inner.type}} sem id` };
     db.prepare("DELETE FROM activity WHERE uri = ?").run(targetUri);
     console.log(`[${config.peerId}] undo ${inner.type}: removida ${targetUri}`);
     return { status: "undo" };
@@ -341,101 +489,105 @@ function handleUndo(db: Database, config: PlatformConfig, body: any): IncomingRe
   return { status: "ignored", detail: `Undo de ${inner.type}` };
 }
 
-function handleContent(db: Database, config: PlatformConfig, body: any): IncomingResult {
-  const uri: string | undefined = body.id;
-  if (!uri) return { status: "ignored", detail: "Activity sem id" };
+/** Aplica uma Activity de conteúdo (após passar pela ordenação causal). */
+function applyContent(db: Database, wire: Wire): void {
+  const { activity, _meta } = wire;
+  const object = activity.object ?? {};
 
-  // Dedup: já aplicada ou já no buffer?
-  const seen = db.prepare("SELECT 1 FROM activity WHERE uri = ?").get(uri);
-  if (seen) return { status: "duplicate" };
-  const buffered = db.prepare("SELECT 1 FROM inbox_buffer WHERE activityUri = ?").get(uri);
-  if (buffered) return { status: "duplicate" };
-
-  const inReplyTo: string | undefined = body.object?.inReplyTo;
-
-  // Buffer causal: se depende de uma Activity ainda não recebida, segura.
-  if (inReplyTo) {
-    const depSeen = db.prepare("SELECT 1 FROM activity WHERE uri = ?").get(inReplyTo);
-    if (!depSeen) {
-      db.prepare(
-        `INSERT INTO inbox_buffer (id, activityUri, dependsOn, payload, receivedAt)
-         VALUES (?, ?, ?, ?, ?)`
-      ).run(ulid(), uri, inReplyTo, JSON.stringify(body), new Date().toISOString());
-      console.log(`[${config.peerId}] Activity ${uri} em buffer (aguarda ${inReplyTo})`);
-      return { status: "buffered" };
-    }
+  if (activity.type === "Update") {
+    // Last-writer-wins pelo relógio de Lamport observado.
+    db.prepare(
+      `UPDATE activity SET content = ?, attachmentUrl = ?, meta = ?, lamportClock = ?, raw = ?
+       WHERE uri = ?`
+    ).run(
+      object.content ?? null,
+      object.attachment ?? null,
+      extractMeta(object),
+      observeLamport(db, 0),
+      JSON.stringify(wire),
+      object.id ?? activity.object?.id ?? activity.id
+    );
+    return;
   }
 
-  applyContent(db, body);
-  flushDependents(db, config, uri);
-  return { status: "applied" };
-}
+  if (activity.type === "Delete") {
+    const targetUri = typeof object === "string" ? object : object.id ?? activity.id;
+    db.prepare("DELETE FROM activity WHERE uri = ?").run(targetUri);
+    return;
+  }
 
-/** Persiste uma Activity remota de conteúdo na tabela activity. */
-function applyContent(db: Database, body: any): void {
-  const object = body.object ?? {};
+  // Create / Like / Announce: insere.
   db.prepare(
     `INSERT OR IGNORE INTO activity
        (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, published, raw, authorId)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)`
   ).run(
     ulid(),
-    body.id,
-    body.type,
-    body.actor,
+    activity.id,
+    activity.type,
+    activity.actor,
     object.type ?? "Note",
     object.content ?? null,
     object.attachment ?? null,
     extractMeta(object),
-    object.inReplyTo ?? null,
-    typeof body._lamportClock === "number" ? body._lamportClock : 0,
-    body.published ?? new Date().toISOString(),
-    JSON.stringify(body)
+    object.inReplyTo ?? _meta.inReplyTo ?? null,
+    observeLamport(db, 0),
+    activity.published ?? _meta.ts ?? new Date().toISOString(),
+    JSON.stringify(wire)
   );
 }
 
-/** Após aplicar uma Activity, libera do buffer as que dependiam dela. */
-function flushDependents(db: Database, config: PlatformConfig, appliedUri: string): void {
-  const dependents = db
-    .prepare("SELECT * FROM inbox_buffer WHERE dependsOn = ?")
-    .all(appliedUri) as { id: string; activityUri: string; payload: string }[];
-
-  for (const dep of dependents) {
-    db.prepare("DELETE FROM inbox_buffer WHERE id = ?").run(dep.id);
-    const body = JSON.parse(dep.payload);
-    applyContent(db, body);
-    console.log(`[${config.peerId}] Activity ${dep.activityUri} liberada do buffer`);
-    flushDependents(db, config, dep.activityUri);
+/** Reavalia o buffer: aplica tudo que se tornou entregável após o merge. */
+function reevaluateBuffer(db: Database, config: PlatformConfig): void {
+  let progress = true;
+  while (progress) {
+    progress = false;
+    const rows = db
+      .prepare("SELECT * FROM inbox_buffer ORDER BY receivedAt")
+      .all() as { id: string; msgId: string; origin: string; payload: string }[];
+    for (const r of rows) {
+      const wire = JSON.parse(r.payload) as Wire;
+      if (isDeliverable(getVClock(db), wire._meta.vclock, wire._meta.origin)) {
+        db.prepare("DELETE FROM inbox_buffer WHERE id = ?").run(r.id);
+        applyContent(db, wire);
+        mergeVClock(db, wire._meta.vclock);
+        markProcessed(db, wire._meta.msgId);
+        console.log(`[${config.peerId}] ${wire.activity.type} ${r.msgId} liberado do buffer`);
+        progress = true;
+      }
+    }
   }
 }
 
 /**
- * Sweeper: aplica Activities que ficaram tempo demais no buffer causal (a
- * dependência nunca chegou). Preserva disponibilidade em vez de bloquear para
- * sempre — consistência eventual.
+ * Sweeper: aplica mensagens presas tempo demais no buffer (a dependência causal
+ * nunca chegou). Preserva disponibilidade em vez de bloquear — consistência
+ * eventual (AP).
  */
 function sweepBuffer(db: Database, config: PlatformConfig): void {
   const cutoff = new Date(Date.now() - BUFFER_MAX_WAIT_MS).toISOString();
   const stale = db
-    .prepare("SELECT * FROM inbox_buffer WHERE receivedAt <= ?")
-    .all(cutoff) as { id: string; activityUri: string; payload: string }[];
+    .prepare("SELECT * FROM inbox_buffer WHERE receivedAt <= ? ORDER BY receivedAt")
+    .all(cutoff) as { id: string; msgId: string; payload: string }[];
 
   for (const s of stale) {
+    const wire = JSON.parse(s.payload) as Wire;
     db.prepare("DELETE FROM inbox_buffer WHERE id = ?").run(s.id);
-    applyContent(db, JSON.parse(s.payload));
-    console.warn(`[${config.peerId}] Activity ${s.activityUri} aplicada por timeout de buffer`);
-    flushDependents(db, config, s.activityUri);
+    applyContent(db, wire);
+    mergeVClock(db, wire._meta.vclock);
+    markProcessed(db, wire._meta.msgId);
+    console.warn(`[${config.peerId}] ${wire.activity.type} ${s.msgId} aplicado por timeout de buffer`);
   }
+  if (stale.length) reevaluateBuffer(db, config);
 }
 
 // ---------------------------------------------------------------------------
 // Loop de fundo
 // ---------------------------------------------------------------------------
 
-/** Inicia o dispatcher de entregas e o sweeper de buffer. Chamado por createApp. */
 export function startFederation(db: Database, config: PlatformConfig): void {
   setInterval(() => {
-    void dispatchPending(db, config);
+    void dispatchPending(db);
   }, DISPATCH_INTERVAL_MS).unref();
 
   setInterval(() => {

@@ -11,6 +11,7 @@ import {
 } from "../activitystreams";
 import {
   nextLamport,
+  wrap,
   fanOutToFollowers,
   sendFollow,
   sendUnfollow,
@@ -138,8 +139,8 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     const row = db.prepare("SELECT * FROM activity WHERE id = ?").get(id) as ActivityRow;
     const as2 = activityToAS2(BASE_URL, row);
 
-    // Fase 2: replica para as inboxes dos seguidores (entrega assíncrona).
-    fanOutToFollowers(db, actor, as2);
+    // Envolve no envelope _meta (msgId + vclock) e replica para os seguidores.
+    fanOutToFollowers(db, wrap(db, as2, inReplyTo));
 
     res.status(201).json(as2);
   });
@@ -263,7 +264,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const targetUri = row.uri ?? `${BASE_URL}/activities/${row.id}`;
     const undo = buildUndo(db, actor, { type: row.type, id: targetUri });
-    fanOutToFollowers(db, actor, undo);
+    fanOutToFollowers(db, undo);
     db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
 
     res.json({ undone: targetUri, type: row.type });
