@@ -9,6 +9,7 @@ import {
   type ActivityRow,
   type PersonRow,
 } from "../activitystreams";
+import { nextLamport, fanOutToFollowers, sendFollow } from "../federation";
 import type { PlatformConfig } from "../types";
 
 const createPersonSchema = z.object({
@@ -98,29 +99,40 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const id = ulid();
     const published = new Date().toISOString();
-    const uri = actorUri(BASE_URL, person.id);
+    const actor = actorUri(BASE_URL, person.id);
+    const activityUri = `${BASE_URL}/activities/${id}`;
+    const inReplyTo =
+      meta && typeof meta.inReplyTo === "string" ? meta.inReplyTo : null;
+    const lamport = nextLamport(db);
     const raw = JSON.stringify({ type, objectType, content, attachmentUrl, meta });
 
     db.prepare(
       `INSERT INTO activity
-         (id, type, actorUri, objectType, content, attachmentUrl, meta, lamportClock, published, raw, authorId)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+         (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, published, raw, authorId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`
     ).run(
       id,
+      activityUri,
       type,
-      uri,
+      actor,
       objectType,
       content ?? null,
       attachmentUrl ?? null,
       meta ? JSON.stringify(meta) : null,
-      0,
+      inReplyTo,
+      lamport,
       published,
       raw,
       person.id
     );
 
     const row = db.prepare("SELECT * FROM activity WHERE id = ?").get(id) as ActivityRow;
-    res.status(201).json(activityToAS2(BASE_URL, row));
+    const as2 = activityToAS2(BASE_URL, row);
+
+    // Fase 2: replica para as inboxes dos seguidores (entrega assíncrona).
+    fanOutToFollowers(db, actor, as2);
+
+    res.status(201).json(as2);
   });
 
   // POST /users/:id/following — segue outro ator (por enquanto, só local)
@@ -146,7 +158,38 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       return res.status(409).json({ error: "já segue esse ator" });
     }
 
+    // Se o ator seguido mora em outro peer, avisa esse peer via Follow federado,
+    // para que ele passe a nos entregar as postagens do ator (fan-out remoto).
+    if (!followeeUri.startsWith(BASE_URL)) {
+      sendFollow(db, followerUri, followeeUri);
+    }
+
     res.status(201).json({ follower: followerUri, followee: followeeUri });
+  });
+
+  // GET /users/:id/feed — linha do tempo: Activities dos atores que :id segue
+  // (locais e remotas recebidas por federação), ordenadas pelo relógio lógico.
+  router.get("/users/:id/feed", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const uri = actorUri(BASE_URL, person.id);
+    const rows = db
+      .prepare(
+        `SELECT * FROM activity
+           WHERE actorUri IN (SELECT followeeActorUri FROM follow WHERE followerActorUri = ?)
+           ORDER BY lamportClock ASC, published ASC`
+      )
+      .all(uri) as ActivityRow[];
+
+    res.json({
+      "@context": "https://www.w3.org/ns/activitystreams",
+      type: "OrderedCollection",
+      totalItems: rows.length,
+      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r)),
+    });
   });
 
   // GET /users/:id/following

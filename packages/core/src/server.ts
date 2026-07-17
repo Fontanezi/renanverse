@@ -2,6 +2,7 @@ import express, { type Express } from "express";
 import { createDb } from "./db";
 import { createUsersRouter } from "./routes/users";
 import { createInboxRouter } from "./routes/inbox";
+import { startFederation } from "./federation";
 import type { PlatformConfig } from "./types";
 
 /** Monta o Express app de um peer a partir da config da plataforma. */
@@ -15,15 +16,18 @@ export function createApp(config: PlatformConfig): Express {
       peer: config.peerId,
       platform: config.displayName,
       status: "ok",
-      phase: "Fase 1 — peer único, sem federação",
+      phase: "Fase 2 - federacao entre peers",
     });
   });
 
   app.use(createUsersRouter(db, config));
-  app.use(createInboxRouter());
+  app.use(createInboxRouter(db, config));
 
   // Rotas específicas da plataforma (ex.: /communities do Reddit), se houver.
   config.mountExtraRoutes?.(app, db);
+
+  // Dispatcher de entregas + sweeper do buffer causal (loop de fundo do peer).
+  startFederation(db, config);
 
   return app;
 }
