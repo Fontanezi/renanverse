@@ -22,6 +22,9 @@ export function createApp(config: PlatformConfig): Express {
   app.use(createUsersRouter(db, config));
   app.use(createInboxRouter());
 
+  // Rotas específicas da plataforma (ex.: /communities do Reddit), se houver.
+  config.mountExtraRoutes?.(app, db);
+
   return app;
 }
 

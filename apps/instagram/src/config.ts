@@ -1,23 +1,34 @@
 import { z } from "zod";
 import type { PlatformConfig } from "@renanverse/core";
 
+/** Legenda (caption) do Instagram: limite generoso, como no produto real. */
+export const CAPTION_MAX_CHARS = 2200;
+
 /**
- * TODO (Instagram): regras específicas ainda por implementar.
- * Diferenças esperadas em relação ao Twitter:
- * - objectType fixo em "Image" (em vez de "Note")
- * - attachmentUrl OBRIGATÓRIO (toda postagem tem que ter uma imagem)
- * - content vira a legenda (caption), pode ser mais longo, ou até opcional
- * - meta pode guardar { altText, filter } (texto alternativo, filtro aplicado)
- *
- * O schema abaixo é um placeholder próximo do Twitter só para o app subir;
- * ajuste-o quando for implementar o Instagram de verdade.
+ * Regra de negócio do Instagram: postagem é sempre uma imagem.
+ * - objectType é sempre "Image".
+ * - attachmentUrl é OBRIGATÓRIO (não existe post sem imagem); a mensagem
+ *   distingue "campo ausente" de "URL inválida".
+ * - content é a legenda (caption), opcional, até 2200 caracteres.
+ * - meta.altText (texto alternativo de acessibilidade) e meta.filter (filtro
+ *   aplicado) são opcionais e guardados no campo livre `meta` do núcleo.
  */
 export const instagramActivitySchema = z.object({
   type: z.enum(["Create", "Like", "Announce"]).default("Create"),
   objectType: z.literal("Image").default("Image"),
-  content: z.string().max(2200, "Legenda muito longa").optional(), // caption
-  attachmentUrl: z.string().url("A URL da imagem é obrigatória"), // TODO: tornar obrigatório de fato (não .optional())
-}).transform((data) => ({ ...data, meta: undefined }));
+  content: z
+    .string()
+    .max(CAPTION_MAX_CHARS, `A legenda tem no máximo ${CAPTION_MAX_CHARS} caracteres`)
+    .optional(),
+  attachmentUrl: z
+    .string({ required_error: "Toda postagem do Instagram precisa de uma imagem (attachmentUrl)" })
+    .url("attachmentUrl deve ser uma URL de imagem válida"),
+  altText: z.string().max(1000, "O texto alternativo é muito longo").optional(),
+  filter: z.string().optional(),
+}).transform(({ altText, filter, ...rest }) => ({
+  ...rest,
+  meta: altText || filter ? { altText, filter } : undefined,
+}));
 
 export const instagramConfig: PlatformConfig = {
   peerId: process.env.PEER_ID ?? "instagram-peer-local",

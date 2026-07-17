@@ -1,4 +1,6 @@
 import type { ZodType, ZodTypeDef } from "zod";
+import type { Express } from "express";
+import type { Database } from "better-sqlite3";
 
 /**
  * Formato normalizado que a validação de cada app deve produzir,
@@ -39,4 +41,13 @@ export interface PlatformConfig {
    * campos opcionais) não seriam atribuíveis a este campo.
    */
   createActivitySchema: ZodType<ActivityInput, ZodTypeDef, unknown>;
+  /**
+   * Hook opcional para o app registrar rotas próprias, específicas da
+   * plataforma, sem alterar o núcleo. Chamado por `createApp` depois de montar
+   * as rotas genéricas, com o `Express` e o `Database` já prontos.
+   *
+   * Ex.: o Reddit usa isto para expor `GET /communities/:name/outbox`, que não
+   * faz sentido no Twitter nem no Instagram.
+   */
+  mountExtraRoutes?: (app: Express, db: Database) => void;
 }
