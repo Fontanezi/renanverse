@@ -28,9 +28,19 @@ export class Cluster {
   leaderId: number | null = null;
   private electing = false;
   private peers: PeerInfo[];
+  private onLeaderChange?: () => void;
 
   constructor(private config: SuperPeerConfig) {
     this.peers = config.peers.map((url) => ({ url, id: null, alive: false }));
+  }
+
+  /**
+   * Registra um callback chamado quando a liderança muda (viro líder ou aceito
+   * um novo líder). O servidor usa isso para ressincronizar o diretório a partir
+   * do estado atual do cluster (§6.8: o nó que retorna ressincroniza).
+   */
+  setOnLeaderChange(fn: () => void): void {
+    this.onLeaderChange = fn;
   }
 
   get selfId(): number {
@@ -159,6 +169,7 @@ export class Cluster {
   }
 
   private becomeLeader(): void {
+    const was = this.leaderId;
     this.leaderId = this.selfId;
     console.log(`[super-peer #${this.selfId}] assumo como LIDER`);
     for (const p of this.peers) {
@@ -168,6 +179,7 @@ export class Cluster {
         body: JSON.stringify({ leaderId: this.selfId }),
       });
     }
+    if (was !== this.selfId) this.onLeaderChange?.();
   }
 
   /** Recebeu ELECTION de um ID menor: responde OK e se afirma (Bully). */
@@ -183,9 +195,11 @@ export class Cluster {
       void this.startElection();
       return;
     }
+    const changed = this.leaderId !== leaderId;
     this.leaderId = leaderId;
     this.electing = false;
     console.log(`[super-peer #${this.selfId}] novo lider: #${leaderId}`);
+    if (changed) this.onLeaderChange?.();
   }
 
   start(): void {

@@ -18,6 +18,8 @@ import {
   buildUndo,
   buildUpdate,
   buildDelete,
+  buildLike,
+  buildAnnounce,
   sendReject,
   recordLocalContent,
   catchupSince,
@@ -359,6 +361,41 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     return res.status(400).json({ error: `tipo ${row.type} nao pode ser removido por aqui` });
   });
+
+  // POST /users/:id/likes  e  POST /users/:id/announces — curte (Like) ou
+  // compartilha (Announce) um objeto por URI (§3). O objeto alvo é a URI da
+  // Activity/objeto; federa aos seguidores. O desfazer (Undo) vai por
+  // DELETE /users/:id/activities/:activityId (unlike/unboost já implementado).
+  const contentAction =
+    (kind: "Like" | "Announce") =>
+      (req: import("express").Request, res: import("express").Response) => {
+        const person = db
+          .prepare("SELECT * FROM person WHERE id = ?")
+          .get(req.params.id) as PersonRow | undefined;
+        if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+        const schema = z.object({ object: z.string().url() });
+        const parsed = schema.safeParse(req.body);
+        if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+        const actor = actorUri(BASE_URL, person.id);
+        const target = parsed.data.object;
+        const wire =
+          kind === "Like" ? buildLike(db, actor, target) : buildAnnounce(db, actor, target);
+
+        // Registra local (entra no feed dos seguidores + catch-up) e federa.
+        // O `localId` e a chave para desfazer depois (DELETE /activities/:id).
+        const localId = recordLocalContent(db, wire, JSON.stringify({ object: target }));
+        fanOutToFollowers(db, wire);
+        publishActivityToFollowers(db, config, actor, "feed:activity", wire.activity);
+
+        return res
+          .status(201)
+          .json({ type: kind, actor, object: target, id: localId, uri: wire.activity.id });
+      };
+
+  router.post("/users/:id/likes", contentAction("Like"));
+  router.post("/users/:id/announces", contentAction("Announce"));
 
   // DELETE /users/:id/followers — remove um seguidor (rejeita o Follow). Federa
   // um Reject para a inbox do seguidor, que então desfaz o follow do lado dele.

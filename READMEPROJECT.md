@@ -14,12 +14,12 @@ renanverse/
       src/db.ts                 # schema sqlite (person, follow, activity, kv, delivery, inbox_buffer, processed_msg)
       src/activitystreams.ts    # tipos + serialização AS2 (Person com publicKey)
       src/types.ts              # PlatformConfig / ActivityInput
-      src/federation.ts         # envelope _meta, relógio vetorial (§6.6), outbox durável, inbox causal, anti-entropy, Update/Delete/Reject/Mention
+      src/federation.ts         # envelope _meta, relógio vetorial (§6.6), outbox durável, inbox causal, anti-entropy, Create/Update/Delete/Like/Announce/Reject/Mention
       src/registry.ts           # cliente do super peer: registro no líder + resolução de handle (super peer, com WebFinger de fallback)
       src/realtime.ts           # pub/sub Socket.io (rooms por usuário) + Redis adapter opcional
       src/webfinger.ts          # descoberta: resolve handle usuario@host para a URI do ator
       src/httpsig.ts            # HTTP Signatures (RSA): assina e verifica entregas
-      src/routes/users.ts       # /users, /outbox, /following, /activities (Update/Delete/Undo), /followers (Reject), /feed, /mentions, /catchup
+      src/routes/users.ts       # /users, /outbox, /following, /activities (Update/Delete/Undo), /likes, /announces, /followers (Reject), /feed, /mentions, /catchup
       src/routes/inbox.ts       # inbox assinada: POST /users/:id/inbox
       src/routes/webfinger.ts   # GET /.well-known/webfinger
       src/server.ts             # createApp() / startApp() + http.Server + Socket.io + federação + registro
@@ -93,6 +93,8 @@ Super peer: `SUPERPEER_ID` (numérico, decide a eleição), `PORT`, `BASE_URL`,
 | GET  | `/users/:id/outbox` | Activities publicadas pelo ator (exclui Update/Delete) |
 | PATCH | `/users/:id/activities/:activityId` | edita um post `Create` local e federa um `Update` |
 | DELETE | `/users/:id/activities/:activityId` | `Create` federa `Delete` (tombstone); `Like`/`Announce` federa `Undo` |
+| POST | `/users/:id/likes` | curte um objeto por URI (`Like`) e federa aos seguidores |
+| POST | `/users/:id/announces` | compartilha/boost um objeto por URI (`Announce`) e federa aos seguidores |
 | POST | `/users/:id/following` | segue por `actorUri` ou `handle`; se remoto, federa `Follow` |
 | DELETE | `/users/:id/following` | deixa de seguir; se remoto, federa `Undo{Follow}` |
 | DELETE | `/users/:id/followers` | remove um seguidor e federa `Reject{Follow}` |
@@ -180,8 +182,11 @@ segurança contra omissão silenciosa: o que se perdeu na entrega é recuperado.
 
 ## Activities suportadas
 
-- Create/Like/Announce: publicação e interações, entram no feed pela ordenação
-  causal.
+- Create: publicação de post/imagem/link, entra no feed pela ordenação causal.
+- Like e Announce: curtir e compartilhar um objeto existente por URI, via
+  `POST /users/:id/likes` e `POST /users/:id/announces` (o `object` da Activity
+  e a URI do objeto alvo). Federam aos seguidores (§3, "replica p/ seguidores") e
+  entram no feed pela ordenação causal; o desfazer vai por `Undo` (unlike/unboost).
 - Update: `PATCH` num post local federa um `Update` (last-writer-wins pelo
   relógio observado); o feed remoto reflete a edição.
 - Delete: `DELETE` num post `Create` federa um `Delete` (tombstone); o post some
@@ -220,6 +225,13 @@ envia ELECTION aos IDs maiores; se nenhum responde, vira líder e anuncia com
 COORDINATOR; senão, aguarda o anúncio (timeout de 2500ms) e refaz se necessário.
 Um nó de ID maior que recebe COORDINATOR de um ID menor dispara nova eleição,
 garantindo convergência para o maior ID.
+
+Quando a liderança muda (um nó vira líder, ou um nó que retorna aceita o líder
+atual), o super peer ressincroniza o diretório a partir do estado atual do
+cluster (§6.8): o líder reúne as entradas dos seguidores vivos e um seguidor que
+reingressa puxa o diretório do líder, mesclando por LWW. Assim um super peer que
+volta com o diretório vazio o repopula na hora, sem esperar o próximo ciclo de
+registro dos peers.
 
 ### Quórum 2k+1 no diretório (§7.3)
 
@@ -310,7 +322,8 @@ corpo adulterado recebem 401.
 - Paginação das coleções (`outbox`, `followers`, `feed`).
 - Cache das chaves públicas remotas na verificação de assinatura (hoje cada
   verificação busca o ator).
-- Sincronização periódica de diretório entre super peers (hoje a replicação
-  acontece na escrita, com quórum).
 - Suíte de testes automatizados versionada no repositório (a validação de
   integração de ponta a ponta hoje é feita por um roteiro externo).
+- Renderização AS2 mais fiel de `Like`/`Announce` (hoje a URI do objeto alvo
+  fica em `object.object`; o alvo é preservado, mas a forma canônica seria
+  `object` como string).

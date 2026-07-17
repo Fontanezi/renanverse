@@ -364,6 +364,34 @@ export function buildUpdate(
   return wrapContent(db, activity);
 }
 
+/**
+ * Constrói um `Like` (conteúdo) sobre o objeto `targetUri`. O `object` é a URI
+ * do objeto curtido (AS2 permite `object` como string/URI). Federa aos
+ * seguidores (§3, "replica p/ seguidores").
+ */
+export function buildLike(db: Database, actorUri: string, targetUri: string): Wire {
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${actorUri}/likes/${ulid()}`,
+    type: "Like",
+    actor: actorUri,
+    object: targetUri,
+  };
+  return wrapContent(db, activity);
+}
+
+/** Constrói um `Announce` (boost/repost) sobre o objeto `targetUri`. */
+export function buildAnnounce(db: Database, actorUri: string, targetUri: string): Wire {
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${actorUri}/announces/${ulid()}`,
+    type: "Announce",
+    actor: actorUri,
+    object: targetUri,
+  };
+  return wrapContent(db, activity);
+}
+
 /** Constrói um `Delete` (tombstone) do objeto `targetUri`. */
 export function buildDelete(db: Database, actorUri: string, targetUri: string): Wire {
   const activity = {
@@ -597,6 +625,11 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
     return;
   }
 
+  // Like/Announce trazem `object` como URI (string) do objeto alvo; guardamos a
+  // URI no `meta` para preservá-la (Create traz um objeto AS2 completo).
+  const isRef = typeof object === "string";
+  const objMeta = isRef ? JSON.stringify({ object }) : extractMeta(object);
+
   // Create / Like / Announce: insere (guardando origem + seq p/ catch-up).
   db.prepare(
     `INSERT OR IGNORE INTO activity
@@ -607,11 +640,11 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
     activity.id,
     activity.type,
     activity.actor,
-    object.type ?? "Note",
-    object.content ?? null,
-    object.attachment ?? null,
-    extractMeta(object),
-    object.inReplyTo ?? _meta.inReplyTo ?? null,
+    isRef ? null : object.type ?? "Note",
+    isRef ? null : object.content ?? null,
+    isRef ? null : object.attachment ?? null,
+    objMeta,
+    (isRef ? null : object.inReplyTo) ?? _meta.inReplyTo ?? null,
     observeLamport(db, 0),
     _meta.origin,
     _meta.vclock[_meta.origin] ?? 0,
@@ -629,23 +662,26 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
  * sequência de conteúdo por origem contígua (Update/Delete também ticam o
  * vclock). Não aparece no feed/outbox (esses filtram Update/Delete).
  */
-export function recordLocalContent(db: Database, wire: Wire): void {
+export function recordLocalContent(db: Database, wire: Wire, meta: string | null = null): string {
   const { activity, _meta } = wire;
+  const id = ulid();
   db.prepare(
     `INSERT OR IGNORE INTO activity
        (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, origin, originSeq, published, raw, authorId)
-     VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, 1, ?, ?, ?, ?, NULL)`
+     VALUES (?, ?, ?, ?, NULL, NULL, NULL, ?, NULL, ?, 1, ?, ?, ?, ?, NULL)`
   ).run(
-    ulid(),
+    id,
     activity.id,
     activity.type,
     activity.actor,
+    meta,
     nextLamport(db),
     _meta.origin,
     _meta.vclock[_meta.origin] ?? 0,
     _meta.ts,
     JSON.stringify(wire)
   );
+  return id;
 }
 
 // ---------------------------------------------------------------------------

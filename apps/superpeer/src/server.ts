@@ -1,5 +1,5 @@
 import express, { type Express } from "express";
-import { Directory } from "./directory";
+import { Directory, type DirEntry } from "./directory";
 import { Cluster } from "./cluster";
 import type { SuperPeerConfig } from "./config";
 
@@ -118,7 +118,31 @@ export function createSuperPeerApp(
 }
 
 export function startSuperPeer(config: SuperPeerConfig): void {
-  const { app, cluster } = createSuperPeerApp(config);
+  const { app, cluster, directory } = createSuperPeerApp(config);
+
+  // Ressincronização de diretório (§6.8): quando a liderança muda (viro líder,
+  // ou um nó que retorna aceita o líder atual), puxo o diretório do estado atual
+  // do cluster e mesclo (LWW). Assim um super peer que reingressa não fica com o
+  // diretório vazio até o próximo ciclo de registro dos peers.
+  const resyncDirectory = async (): Promise<void> => {
+    const targets = cluster.isLeader()
+      ? cluster.alivePeerUrls() // líder: reúne o que os seguidores vivos têm
+      : cluster.leaderUrl()
+        ? [cluster.leaderUrl() as string] // seguidor: puxa do líder
+        : [];
+    for (const url of targets) {
+      try {
+        const res = await fetch(`${url}/directory`, { signal: AbortSignal.timeout(1000) });
+        if (!res.ok) continue;
+        const body = (await res.json()) as { entries?: DirEntry[] };
+        if (Array.isArray(body.entries)) directory.merge(body.entries);
+      } catch {
+        /* alvo indisponível: tenta na próxima mudança de liderança */
+      }
+    }
+  };
+  cluster.setOnLeaderChange(() => void resyncDirectory());
+
   app.listen(config.port, () => {
     console.log(`[super-peer #${config.id}] rodando em ${config.baseUrl} (porta ${config.port})`);
     cluster.start();
