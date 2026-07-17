@@ -2,6 +2,7 @@ import express, { type Express } from "express";
 import { createDb } from "./db";
 import { createUsersRouter } from "./routes/users";
 import { createInboxRouter } from "./routes/inbox";
+import { createWebfingerRouter } from "./routes/webfinger";
 import { startFederation } from "./federation";
 import type { PlatformConfig } from "./types";
 
@@ -20,6 +21,7 @@ export function createApp(config: PlatformConfig): Express {
     });
   });
 
+  app.use(createWebfingerRouter(db, config));
   app.use(createUsersRouter(db, config));
   app.use(createInboxRouter(db, config));
 

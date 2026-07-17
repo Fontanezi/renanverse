@@ -10,6 +10,7 @@ import {
   type PersonRow,
 } from "../activitystreams";
 import { nextLamport, fanOutToFollowers, sendFollow } from "../federation";
+import { resolveHandleToActorUri } from "../webfinger";
 import type { PlatformConfig } from "../types";
 
 const createPersonSchema = z.object({
@@ -135,19 +136,40 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     res.status(201).json(as2);
   });
 
-  // POST /users/:id/following — segue outro ator (por enquanto, só local)
-  router.post("/users/:id/following", (req, res) => {
+  // POST /users/:id/following — segue outro ator. Aceita a URI completa
+  // (`actorUri`) ou um handle "usuario@host" (`handle`), resolvido por WebFinger.
+  router.post("/users/:id/following", async (req, res) => {
     const person = db
       .prepare("SELECT * FROM person WHERE id = ?")
       .get(req.params.id) as PersonRow | undefined;
     if (!person) return res.status(404).json({ error: "Person não encontrado" });
 
-    const schema = z.object({ actorUri: z.string().url() });
+    const schema = z
+      .object({
+        actorUri: z.string().url().optional(),
+        handle: z.string().min(3).optional(),
+      })
+      .refine((d) => d.actorUri || d.handle, {
+        message: "informe 'actorUri' (URI completa) ou 'handle' (usuario@host)",
+      });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
 
     const followerUri = actorUri(BASE_URL, person.id);
-    const followeeUri = parsed.data.actorUri;
+    let followeeUri = parsed.data.actorUri ?? null;
+
+    // Sem a URI direta: resolve o handle via WebFinger no peer remoto.
+    if (!followeeUri && parsed.data.handle) {
+      followeeUri = await resolveHandleToActorUri(parsed.data.handle);
+      if (!followeeUri) {
+        return res
+          .status(404)
+          .json({ error: `nao foi possivel resolver o handle '${parsed.data.handle}' via WebFinger` });
+      }
+    }
+    if (!followeeUri) {
+      return res.status(400).json({ error: "ator a seguir nao determinado" });
+    }
 
     try {
       db.prepare(
