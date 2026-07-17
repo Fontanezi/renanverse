@@ -1,13 +1,17 @@
 import express, { type Express } from "express";
 import { Directory } from "./directory";
+import { Cluster } from "./cluster";
 import type { SuperPeerConfig } from "./config";
 
 /**
- * Monta o app do super peer. Fase A1: diretório de descoberta (registro +
- * resolução). Cluster (Bully) e quórum entram nas fases A3/A4, estendendo isto.
+ * Monta o app do super peer: diretório de descoberta + coordenação de cluster
+ * (heartbeat + eleição Bully).
  */
-export function createSuperPeerApp(config: SuperPeerConfig): { app: Express; directory: Directory } {
+export function createSuperPeerApp(
+  config: SuperPeerConfig
+): { app: Express; directory: Directory; cluster: Cluster } {
   const directory = new Directory();
+  const cluster = new Cluster(config);
   const app = express();
   app.use(express.json());
 
@@ -16,9 +20,34 @@ export function createSuperPeerApp(config: SuperPeerConfig): { app: Express; dir
       role: "super-peer",
       id: config.id,
       baseUrl: config.baseUrl,
+      leaderId: cluster.leaderId,
+      isLeader: cluster.isLeader(),
       cluster: config.peers,
       directorySize: directory.size,
     });
+  });
+
+  // --- Coordenação do cluster (Bully / heartbeat) ---
+
+  app.get("/ping", (_req, res) => {
+    res.json({ id: config.id, leaderId: cluster.leaderId, alive: true });
+  });
+
+  app.post("/election", (req, res) => {
+    const fromId = Number(req.body?.fromId);
+    if (!Number.isFinite(fromId)) return res.status(400).json({ error: "fromId invalido" });
+    res.json(cluster.onElection(fromId));
+  });
+
+  app.post("/coordinator", (req, res) => {
+    const leaderId = Number(req.body?.leaderId);
+    if (!Number.isFinite(leaderId)) return res.status(400).json({ error: "leaderId invalido" });
+    cluster.onCoordinator(leaderId);
+    res.json({ ok: true });
+  });
+
+  app.get("/status", (_req, res) => {
+    res.json(cluster.status());
   });
 
   // POST /register — um peer anuncia seus atores { peer, actors:[{handle,actorUri}] }.
@@ -50,12 +79,13 @@ export function createSuperPeerApp(config: SuperPeerConfig): { app: Express; dir
     res.json({ entries: directory.all() });
   });
 
-  return { app, directory };
+  return { app, directory, cluster };
 }
 
 export function startSuperPeer(config: SuperPeerConfig): void {
-  const { app } = createSuperPeerApp(config);
+  const { app, cluster } = createSuperPeerApp(config);
   app.listen(config.port, () => {
     console.log(`[super-peer #${config.id}] rodando em ${config.baseUrl} (porta ${config.port})`);
+    cluster.start();
   });
 }
