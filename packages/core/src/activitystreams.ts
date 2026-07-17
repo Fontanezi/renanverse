@@ -13,6 +13,9 @@ export interface PersonRow {
 
 export interface ActivityRow {
   id: string;
+  /** URI canônica global da Activity (AS2 "id"). Para activities locais é
+   *  `${baseUrl}/activities/${id}`; para remotas, é o id vindo da origem. */
+  uri: string | null;
   type: string;
   actorUri: string;
   objectType: string | null;
@@ -22,7 +25,11 @@ export interface ActivityRow {
    *  community/subreddit, filtro aplicado na foto do Instagram, etc).
    *  Cada app decide o que colocar aqui; o núcleo só guarda e devolve. */
   meta: string | null;
+  /** URI da Activity da qual esta depende causalmente (ex.: resposta a um post). */
+  inReplyTo: string | null;
   lamportClock: number;
+  /** 1 = criada neste peer; 0 = recebida de outro peer via federação. */
+  isLocal: number;
   published: string;
   raw: string;
   authorId: string | null;
@@ -33,11 +40,17 @@ export function actorUri(baseUrl: string, personId: string): string {
   return `${baseUrl}/users/${personId}`;
 }
 
-/** Serializa um Person do banco para o objeto AS2 "Person". */
-export function personToAS2(baseUrl: string, p: PersonRow) {
+/**
+ * Serializa um Person do banco para o objeto AS2 "Person". Quando `publicKeyPem`
+ * é informado, publica o bloco `publicKey` (usado pela verificação de
+ * HTTP Signatures do peer que recebe as entregas deste ator).
+ */
+export function personToAS2(baseUrl: string, p: PersonRow, publicKeyPem?: string) {
   const uri = actorUri(baseUrl, p.id);
   return {
-    "@context": ["https://www.w3.org/ns/activitystreams"],
+    "@context": publicKeyPem
+      ? ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"]
+      : ["https://www.w3.org/ns/activitystreams"],
     type: "Person",
     id: uri,
     preferredUsername: p.preferredUsername,
@@ -48,6 +61,9 @@ export function personToAS2(baseUrl: string, p: PersonRow) {
     followers: `${uri}/followers`,
     inbox: `${uri}/inbox`,
     outbox: `${uri}/outbox`,
+    publicKey: publicKeyPem
+      ? { id: `${uri}#main-key`, owner: uri, publicKeyPem }
+      : undefined,
   };
 }
 
@@ -64,7 +80,8 @@ export function activityToAS2(baseUrl: string, a: ActivityRow) {
 
   return {
     "@context": ["https://www.w3.org/ns/activitystreams"],
-    id: `${baseUrl}/activities/${a.id}`,
+    // Activities remotas preservam a URI da origem; locais derivam do baseUrl.
+    id: a.uri ?? `${baseUrl}/activities/${a.id}`,
     type: a.type,
     actor: a.actorUri,
     published: a.published,
@@ -72,12 +89,13 @@ export function activityToAS2(baseUrl: string, a: ActivityRow) {
       type: a.objectType ?? "Note",
       content: a.content ?? undefined,
       attachment: a.attachmentUrl ?? undefined,
+      inReplyTo: a.inReplyTo ?? undefined,
       // Campos extras específicos da plataforma (ex: title, community) são
       // espalhados aqui dentro do object, sem sujar o vocabulário AS2 padrão.
       ...meta,
     },
     // Campo de extensão nosso — fora do vocabulário padrão AS2, mas necessário
-    // pra causalidade nas próximas fases. Peers que não conhecem, ignoram.
+    // pra causalidade na federação. Peers que não conhecem, ignoram.
     _lamportClock: a.lamportClock,
   };
 }

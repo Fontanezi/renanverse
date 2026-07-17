@@ -37,20 +37,116 @@ export function createDb(dbPath: string): Database.Database {
 
     CREATE TABLE IF NOT EXISTS activity (
       id             TEXT PRIMARY KEY,
+      uri            TEXT,
       type           TEXT NOT NULL,
       actorUri       TEXT NOT NULL,
       objectType     TEXT,
       content        TEXT,
       attachmentUrl  TEXT,
       meta           TEXT,
+      inReplyTo      TEXT,
       lamportClock   INTEGER NOT NULL DEFAULT 0,
+      isLocal        INTEGER NOT NULL DEFAULT 1,
       published      TEXT NOT NULL,
       raw            TEXT NOT NULL,
       authorId       TEXT REFERENCES person(id)
     );
     CREATE INDEX IF NOT EXISTS idx_activity_actor ON activity(actorUri);
     CREATE INDEX IF NOT EXISTS idx_activity_published ON activity(published);
+    -- URI canônica global da Activity (AS2 "id"). Usada para deduplicação na
+    -- federação. NULLs são distintos no SQLite, então índice único convive com
+    -- linhas antigas sem uri preenchida.
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_activity_uri ON activity(uri);
+
+    -- Chave/valor interno do peer (ex.: relógio lógico de Lamport).
+    CREATE TABLE IF NOT EXISTS kv (
+      key    TEXT PRIMARY KEY,
+      value  TEXT NOT NULL
+    );
+
+    -- Outbox DURÁVEL de entrega federada (servidor -> servidor). Cada linha é
+    -- uma tentativa de POST na inbox de outro peer. Sobrevive a reinício do
+    -- processo (padrão transactional outbox): o dispatcher relê PENDING e
+    -- retoma as entregas. Garante at-least-once.
+    CREATE TABLE IF NOT EXISTS delivery (
+      id             TEXT PRIMARY KEY,
+      targetInbox    TEXT NOT NULL,
+      activityUri    TEXT NOT NULL,
+      payload        TEXT NOT NULL,
+      status         TEXT NOT NULL DEFAULT 'PENDING',
+      attempts       INTEGER NOT NULL DEFAULT 0,
+      lastError      TEXT,
+      nextAttemptAt  TEXT NOT NULL,
+      createdAt      TEXT NOT NULL,
+      UNIQUE(targetInbox, activityUri)
+    );
+    CREATE INDEX IF NOT EXISTS idx_delivery_pending ON delivery(status, nextAttemptAt);
+
+    -- Buffer causal (hold-back queue): Activities recebidas que ainda não são
+    -- entregáveis pela regra do relógio vetorial (§6.6) ficam aqui até que o
+    -- Vlocal avance o suficiente. Guarda o envelope { activity, _meta } inteiro.
+    CREATE TABLE IF NOT EXISTS inbox_buffer (
+      id           TEXT PRIMARY KEY,
+      msgId        TEXT NOT NULL UNIQUE,
+      origin       TEXT NOT NULL,
+      payload      TEXT NOT NULL,
+      receivedAt   TEXT NOT NULL
+    );
+
+    -- Deduplicação por msgId (envelope _meta): registra toda mensagem já
+    -- processada, para descartar reentregas (at-least-once -> exactly-once).
+    CREATE TABLE IF NOT EXISTS processed_msg (
+      msgId  TEXT PRIMARY KEY,
+      at     TEXT NOT NULL
+    );
   `);
 
+  migrateActivityColumns(db);
+  migrateBufferShape(db);
+
   return db;
+}
+
+/**
+ * A Fase 2 usava inbox_buffer com colunas (activityUri, dependsOn); a Fase 3
+ * passa a bufferizar por relógio vetorial (msgId, origin). Como o buffer é
+ * transitório, se detectarmos o formato antigo, recriamos a tabela.
+ */
+function migrateBufferShape(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(inbox_buffer)").all() as { name: string }[]).map((c) => c.name)
+  );
+  if (!cols.has("msgId")) {
+    db.exec(`
+      DROP TABLE IF EXISTS inbox_buffer;
+      CREATE TABLE inbox_buffer (
+        id           TEXT PRIMARY KEY,
+        msgId        TEXT NOT NULL UNIQUE,
+        origin       TEXT NOT NULL,
+        payload      TEXT NOT NULL,
+        receivedAt   TEXT NOT NULL
+      );
+    `);
+  }
+}
+
+/**
+ * Migração defensiva: bancos criados na Fase 1 não têm as colunas de federação.
+ * Adiciona-as se faltarem (ALTER TABLE ADD COLUMN é no-op seguro quando a coluna
+ * já existe, mas o SQLite não tem "IF NOT EXISTS" para coluna, então checamos).
+ */
+function migrateActivityColumns(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(activity)").all() as { name: string }[]).map((c) => c.name)
+  );
+  const add = (name: string, ddl: string) => {
+    if (!cols.has(name)) db.exec(`ALTER TABLE activity ADD COLUMN ${ddl}`);
+  };
+  add("uri", "uri TEXT");
+  add("inReplyTo", "inReplyTo TEXT");
+  add("isLocal", "isLocal INTEGER NOT NULL DEFAULT 1");
+  // Fase 3 (anti-entropy): origem (peer autor) e nº de sequência do vclock da
+  // origem no momento da publicação, usados para o catch-up "desde o seq N".
+  add("origin", "origin TEXT");
+  add("originSeq", "originSeq INTEGER");
 }
