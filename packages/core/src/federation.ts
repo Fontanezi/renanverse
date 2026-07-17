@@ -339,6 +339,55 @@ export function sendUnfollow(db: Database, followerUri: string, followeeUri: str
   enqueueDelivery(db, inboxUrlForActor(followeeUri), wire._meta.msgId, wire);
 }
 
+/** Constrói um `Update` (conteúdo) editando o objeto `targetUri`. */
+export function buildUpdate(
+  db: Database,
+  actorUri: string,
+  targetUri: string,
+  objectType: string,
+  content: string | null,
+  attachmentUrl: string | null
+): Wire {
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${actorUri}/updates/${ulid()}`,
+    type: "Update",
+    actor: actorUri,
+    object: {
+      type: objectType,
+      id: targetUri,
+      content: content ?? undefined,
+      attachment: attachmentUrl ?? undefined,
+    },
+  };
+  return wrapContent(db, activity);
+}
+
+/** Constrói um `Delete` (tombstone) do objeto `targetUri`. */
+export function buildDelete(db: Database, actorUri: string, targetUri: string): Wire {
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${actorUri}/deletes/${ulid()}`,
+    type: "Delete",
+    actor: actorUri,
+    object: { id: targetUri },
+  };
+  return wrapContent(db, activity);
+}
+
+/** Federa um `Reject{Follow}` para a inbox do seguidor (remove-o como follower). */
+export function sendReject(db: Database, followeeUri: string, followerUri: string): void {
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${followeeUri}/rejects/${ulid()}`,
+    type: "Reject",
+    actor: followeeUri,
+    object: { type: "Follow", actor: followerUri, object: followeeUri },
+  };
+  const wire = wrapControl(db, activity);
+  enqueueDelivery(db, inboxUrlForActor(followerUri), wire._meta.msgId, wire);
+}
+
 // ---------------------------------------------------------------------------
 // Recepção (inbox)
 // ---------------------------------------------------------------------------
@@ -562,6 +611,31 @@ function applyContent(db: Database, wire: Wire): void {
     _meta.origin,
     _meta.vclock[_meta.origin] ?? 0,
     activity.published ?? _meta.ts ?? new Date().toISOString(),
+    JSON.stringify(wire)
+  );
+}
+
+/**
+ * Registra uma Activity de conteúdo originada localmente (Update/Delete) como
+ * linha na tabela activity, apenas para o catch-up poder reproduzi-la. Mantém a
+ * sequência de conteúdo por origem contígua (Update/Delete também ticam o
+ * vclock). Não aparece no feed/outbox (esses filtram Update/Delete).
+ */
+export function recordLocalContent(db: Database, wire: Wire): void {
+  const { activity, _meta } = wire;
+  db.prepare(
+    `INSERT OR IGNORE INTO activity
+       (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, origin, originSeq, published, raw, authorId)
+     VALUES (?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, ?, 1, ?, ?, ?, ?, NULL)`
+  ).run(
+    ulid(),
+    activity.id,
+    activity.type,
+    activity.actor,
+    nextLamport(db),
+    _meta.origin,
+    _meta.vclock[_meta.origin] ?? 0,
+    _meta.ts,
     JSON.stringify(wire)
   );
 }

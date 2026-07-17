@@ -16,6 +16,10 @@ import {
   sendFollow,
   sendUnfollow,
   buildUndo,
+  buildUpdate,
+  buildDelete,
+  sendReject,
+  recordLocalContent,
   catchupSince,
 } from "../federation";
 import { resolveHandleToActorUri } from "../webfinger";
@@ -28,6 +32,16 @@ const createPersonSchema = z.object({
   summary: z.string().optional(),
   icon: z.string().url().optional(),
 });
+
+/** Extrai handles "usuario@host" de menções `@usuario@host` no texto. */
+function parseHandles(content: string | undefined | null): string[] {
+  if (!content) return [];
+  const re = /@([a-zA-Z0-9_.-]+)@([a-zA-Z0-9_.:-]+)/g;
+  const out = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(content)) !== null) out.add(`${m[1]}@${m[2]}`);
+  return [...out];
+}
 
 /**
  * Router genérico de Person/Activity. Idêntico entre os 3 apps, exceto pela
@@ -84,7 +98,9 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const uri = actorUri(BASE_URL, person.id);
     const rows = db
-      .prepare("SELECT * FROM activity WHERE actorUri = ? ORDER BY published DESC")
+      .prepare(
+        "SELECT * FROM activity WHERE actorUri = ? AND type NOT IN ('Update','Delete') ORDER BY published DESC"
+      )
       .all(uri) as ActivityRow[];
 
     res.json({
@@ -95,8 +111,9 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     });
   });
 
-  // POST /users/:id/outbox — cria um post local (Fase 1: sem replicação ainda)
-  router.post("/users/:id/outbox", (req, res) => {
+  // POST /users/:id/outbox — cria um post local e o replica (fan-out) para
+  // seguidores e atores mencionados (@usuario@host no conteúdo).
+  router.post("/users/:id/outbox", async (req, res) => {
     const person = db
       .prepare("SELECT * FROM person WHERE id = ?")
       .get(req.params.id) as PersonRow | undefined;
@@ -139,6 +156,18 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const row = db.prepare("SELECT * FROM activity WHERE id = ?").get(id) as ActivityRow;
     const as2 = activityToAS2(BASE_URL, row);
+
+    // Menções: resolve @usuario@host (WebFinger) e anexa como tag Mention no
+    // objeto, para o fan-out também entregar aos atores mencionados (§3).
+    const handles = parseHandles(content);
+    if (handles.length) {
+      const tags: { type: "Mention"; href: string }[] = [];
+      for (const h of handles) {
+        const href = await resolveHandleToActorUri(h);
+        if (href) tags.push({ type: "Mention", href });
+      }
+      if (tags.length) (as2.object as Record<string, unknown>).tag = tags;
+    }
 
     // Envolve no envelope _meta (msgId + vclock), registra origem/seq (catch-up)
     // e replica para os seguidores.
@@ -251,9 +280,51 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     res.json({ unfollowed: followeeUri, removed: info.changes });
   });
 
-  // DELETE /users/:id/activities/:activityId — desfaz um Like/Announce local
-  // (unlike/unboost). Federa Undo aos seguidores e remove a Activity localmente.
-  // Desfazer um post (Create) não entra aqui: isso seria uma Activity Delete.
+  // PATCH /users/:id/activities/:activityId — edita um post local (Create) e
+  // federa um Update (§3). Last-writer-wins pelo relógio no destino.
+  router.patch("/users/:id/activities/:activityId", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const actor = actorUri(BASE_URL, person.id);
+    const row = db
+      .prepare("SELECT * FROM activity WHERE id = ? AND actorUri = ?")
+      .get(req.params.activityId, actor) as ActivityRow | undefined;
+    if (!row) return res.status(404).json({ error: "Activity não encontrada" });
+    if (row.type !== "Create") {
+      return res.status(400).json({ error: "só posts (Create) podem ser editados" });
+    }
+
+    const schema = z
+      .object({ content: z.string().optional(), attachmentUrl: z.string().url().optional() })
+      .refine((d) => d.content !== undefined || d.attachmentUrl !== undefined, {
+        message: "informe 'content' e/ou 'attachmentUrl'",
+      });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const targetUri = row.uri ?? `${BASE_URL}/activities/${row.id}`;
+    const newContent = parsed.data.content ?? row.content;
+    const newAttachment = parsed.data.attachmentUrl ?? row.attachmentUrl;
+
+    // Atualiza o post local.
+    db.prepare(
+      "UPDATE activity SET content = ?, attachmentUrl = ?, lamportClock = ? WHERE id = ?"
+    ).run(newContent, newAttachment, nextLamport(db), row.id);
+
+    // Federa o Update (e registra para catch-up).
+    const wire = buildUpdate(db, actor, targetUri, row.objectType ?? "Note", newContent, newAttachment);
+    recordLocalContent(db, wire);
+    fanOutToFollowers(db, wire);
+
+    res.json({ updated: targetUri });
+  });
+
+  // DELETE /users/:id/activities/:activityId — remove uma Activity local:
+  //  - Like/Announce -> federa Undo (unlike/unboost);
+  //  - Create        -> federa Delete (tombstone do post).
   router.delete("/users/:id/activities/:activityId", (req, res) => {
     const person = db
       .prepare("SELECT * FROM person WHERE id = ?")
@@ -265,18 +336,50 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       .prepare("SELECT * FROM activity WHERE id = ? AND actorUri = ?")
       .get(req.params.activityId, actor) as ActivityRow | undefined;
     if (!row) return res.status(404).json({ error: "Activity não encontrada" });
-    if (row.type !== "Like" && row.type !== "Announce") {
-      return res
-        .status(400)
-        .json({ error: "só é possível desfazer Like ou Announce (posts usariam Delete)" });
-    }
 
     const targetUri = row.uri ?? `${BASE_URL}/activities/${row.id}`;
-    const undo = buildUndo(db, actor, { type: row.type, id: targetUri });
-    fanOutToFollowers(db, undo);
-    db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
 
-    res.json({ undone: targetUri, type: row.type });
+    if (row.type === "Like" || row.type === "Announce") {
+      fanOutToFollowers(db, buildUndo(db, actor, { type: row.type, id: targetUri }));
+      db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
+      return res.json({ undone: targetUri, type: row.type });
+    }
+
+    if (row.type === "Create") {
+      const wire = buildDelete(db, actor, targetUri);
+      recordLocalContent(db, wire);
+      fanOutToFollowers(db, wire);
+      db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
+      return res.json({ deleted: targetUri, type: row.type });
+    }
+
+    return res.status(400).json({ error: `tipo ${row.type} nao pode ser removido por aqui` });
+  });
+
+  // DELETE /users/:id/followers — remove um seguidor (rejeita o Follow). Federa
+  // um Reject para a inbox do seguidor, que então desfaz o follow do lado dele.
+  router.delete("/users/:id/followers", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const schema = z.object({ actorUri: z.string().url() });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const followeeUri = actorUri(BASE_URL, person.id);
+    const followerUri = parsed.data.actorUri;
+
+    const info = db
+      .prepare("DELETE FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?")
+      .run(followerUri, followeeUri);
+
+    if (!followerUri.startsWith(BASE_URL)) {
+      sendReject(db, followeeUri, followerUri);
+    }
+
+    res.json({ rejected: followerUri, removed: info.changes });
   });
 
   // GET /catchup?since=N — anti-entropy: devolve os envelopes das Activities
@@ -300,9 +403,33 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       .prepare(
         `SELECT * FROM activity
            WHERE actorUri IN (SELECT followeeActorUri FROM follow WHERE followerActorUri = ?)
+             AND type NOT IN ('Update','Delete')
            ORDER BY lamportClock ASC, published ASC`
       )
       .all(uri) as ActivityRow[];
+
+    res.json({
+      "@context": "https://www.w3.org/ns/activitystreams",
+      type: "OrderedCollection",
+      totalItems: rows.length,
+      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r)),
+    });
+  });
+
+  // GET /users/:id/mentions — Activities recebidas que mencionam este ator
+  // (tag Mention com a URI dele), mesmo que não sejam de um ator seguido.
+  router.get("/users/:id/mentions", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const uri = actorUri(BASE_URL, person.id);
+    const rows = db
+      .prepare(
+        `SELECT * FROM activity WHERE type = 'Create' AND raw LIKE ? ORDER BY lamportClock ASC`
+      )
+      .all(`%"href":"${uri}"%`) as ActivityRow[];
 
     res.json({
       "@context": "https://www.w3.org/ns/activitystreams",
