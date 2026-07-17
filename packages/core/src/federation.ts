@@ -172,6 +172,39 @@ export function sendFollow(
   enqueueDelivery(db, inboxUrlForActor(followeeUri), activityUri, payload);
 }
 
+/**
+ * Monta uma Activity `Undo` AS2 envolvendo o objeto original (o Follow/Like/
+ * Announce que se está desfazendo). Recebe um id próprio e estampa o Lamport.
+ */
+export function buildUndo(
+  db: Database,
+  actorUri: string,
+  inner: Record<string, unknown>
+): { id: string; type: "Undo"; actor: string; object: Record<string, unknown>; _lamportClock: number } {
+  return {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${actorUri}/undo/${ulid()}`,
+    type: "Undo",
+    actor: actorUri,
+    object: inner,
+    _lamportClock: nextLamport(db),
+  } as any;
+}
+
+/** Federa um Unfollow (Undo{Follow}) para a inbox do ator seguido. */
+export function sendUnfollow(
+  db: Database,
+  followerUri: string,
+  followeeUri: string
+): void {
+  const undo = buildUndo(db, followerUri, {
+    type: "Follow",
+    actor: followerUri,
+    object: followeeUri,
+  });
+  enqueueDelivery(db, inboxUrlForActor(followeeUri), undo.id, undo);
+}
+
 // ---------------------------------------------------------------------------
 // Recepção (inbox real)
 // ---------------------------------------------------------------------------
@@ -188,7 +221,7 @@ function extractMeta(object: Record<string, unknown> | undefined): string | null
 }
 
 export interface IncomingResult {
-  status: "applied" | "buffered" | "duplicate" | "follow" | "accept" | "ignored";
+  status: "applied" | "buffered" | "duplicate" | "follow" | "accept" | "undo" | "ignored";
   detail?: string;
 }
 
@@ -214,6 +247,8 @@ export function processIncoming(
     case "Accept":
       console.log(`[${config.peerId}] Follow aceito por`, body.actor);
       return { status: "accept" };
+    case "Undo":
+      return handleUndo(db, config, body);
     case "Create":
     case "Like":
     case "Announce":
@@ -250,6 +285,47 @@ function handleFollow(db: Database, config: PlatformConfig, body: any): Incoming
 
   console.log(`[${config.peerId}] novo seguidor remoto: ${followerUri} -> ${followeeUri}`);
   return { status: "follow" };
+}
+
+/**
+ * Trata um Undo recebido. Despacha pelo tipo do objeto interno:
+ *  - Undo{Follow}: remove a relação de follow (o seguidor deixa de seguir);
+ *  - Undo{Like|Announce}: remove a Activity referenciada (por uri).
+ * DELETE é idempotente, então reentregas do Undo são inofensivas (sem dedup).
+ */
+function handleUndo(db: Database, config: PlatformConfig, body: any): IncomingResult {
+  const inner = body.object;
+  if (!inner || typeof inner !== "object") {
+    return { status: "ignored", detail: "Undo sem object" };
+  }
+
+  if (inner.type === "Follow") {
+    const followerUri: string | undefined = inner.actor ?? body.actor;
+    const followeeUri: string | undefined =
+      typeof inner.object === "string" ? inner.object : inner.object?.id;
+    if (!followerUri || !followeeUri) {
+      return { status: "ignored", detail: "Undo{Follow} sem actor/object" };
+    }
+    db.prepare(
+      "DELETE FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?"
+    ).run(followerUri, followeeUri);
+    console.log(`[${config.peerId}] unfollow: ${followerUri} deixou de seguir ${followeeUri}`);
+    return { status: "undo" };
+  }
+
+  if (inner.type === "Like" || inner.type === "Announce") {
+    // A Activity original foi guardada com uri = id do Like/Announce.
+    const targetUri: string | undefined =
+      inner.id ?? (typeof inner.object === "string" ? inner.object : undefined);
+    if (!targetUri) {
+      return { status: "ignored", detail: `Undo{${inner.type}} sem id do alvo` };
+    }
+    db.prepare("DELETE FROM activity WHERE uri = ?").run(targetUri);
+    console.log(`[${config.peerId}] undo ${inner.type}: removida ${targetUri}`);
+    return { status: "undo" };
+  }
+
+  return { status: "ignored", detail: `Undo de ${inner.type}` };
 }
 
 function handleContent(db: Database, config: PlatformConfig, body: any): IncomingResult {

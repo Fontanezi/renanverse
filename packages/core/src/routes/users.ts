@@ -9,7 +9,13 @@ import {
   type ActivityRow,
   type PersonRow,
 } from "../activitystreams";
-import { nextLamport, fanOutToFollowers, sendFollow } from "../federation";
+import {
+  nextLamport,
+  fanOutToFollowers,
+  sendFollow,
+  sendUnfollow,
+  buildUndo,
+} from "../federation";
 import { resolveHandleToActorUri } from "../webfinger";
 import type { PlatformConfig } from "../types";
 
@@ -187,6 +193,78 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     }
 
     res.status(201).json({ follower: followerUri, followee: followeeUri });
+  });
+
+  // DELETE /users/:id/following — deixa de seguir. Aceita `actorUri` ou `handle`.
+  // Remove o follow local e, se o alvo for remoto, federa um Undo{Follow}.
+  router.delete("/users/:id/following", async (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const schema = z
+      .object({
+        actorUri: z.string().url().optional(),
+        handle: z.string().min(3).optional(),
+      })
+      .refine((d) => d.actorUri || d.handle, {
+        message: "informe 'actorUri' (URI completa) ou 'handle' (usuario@host)",
+      });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const followerUri = actorUri(BASE_URL, person.id);
+    let followeeUri = parsed.data.actorUri ?? null;
+    if (!followeeUri && parsed.data.handle) {
+      followeeUri = await resolveHandleToActorUri(parsed.data.handle);
+      if (!followeeUri) {
+        return res
+          .status(404)
+          .json({ error: `nao foi possivel resolver o handle '${parsed.data.handle}' via WebFinger` });
+      }
+    }
+    if (!followeeUri) {
+      return res.status(400).json({ error: "ator a deixar de seguir nao determinado" });
+    }
+
+    const info = db
+      .prepare("DELETE FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?")
+      .run(followerUri, followeeUri);
+
+    if (!followeeUri.startsWith(BASE_URL)) {
+      sendUnfollow(db, followerUri, followeeUri);
+    }
+
+    res.json({ unfollowed: followeeUri, removed: info.changes });
+  });
+
+  // DELETE /users/:id/activities/:activityId — desfaz um Like/Announce local
+  // (unlike/unboost). Federa Undo aos seguidores e remove a Activity localmente.
+  // Desfazer um post (Create) não entra aqui: isso seria uma Activity Delete.
+  router.delete("/users/:id/activities/:activityId", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const actor = actorUri(BASE_URL, person.id);
+    const row = db
+      .prepare("SELECT * FROM activity WHERE id = ? AND actorUri = ?")
+      .get(req.params.activityId, actor) as ActivityRow | undefined;
+    if (!row) return res.status(404).json({ error: "Activity não encontrada" });
+    if (row.type !== "Like" && row.type !== "Announce") {
+      return res
+        .status(400)
+        .json({ error: "só é possível desfazer Like ou Announce (posts usariam Delete)" });
+    }
+
+    const targetUri = row.uri ?? `${BASE_URL}/activities/${row.id}`;
+    const undo = buildUndo(db, actor, { type: row.type, id: targetUri });
+    fanOutToFollowers(db, actor, undo);
+    db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
+
+    res.json({ undone: targetUri, type: row.type });
   });
 
   // GET /users/:id/feed — linha do tempo: Activities dos atores que :id segue
