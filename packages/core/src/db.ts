@@ -145,4 +145,8 @@ function migrateActivityColumns(db: Database.Database): void {
   add("uri", "uri TEXT");
   add("inReplyTo", "inReplyTo TEXT");
   add("isLocal", "isLocal INTEGER NOT NULL DEFAULT 1");
+  // Fase 3 (anti-entropy): origem (peer autor) e nº de sequência do vclock da
+  // origem no momento da publicação, usados para o catch-up "desde o seq N".
+  add("origin", "origin TEXT");
+  add("originSeq", "originSeq INTEGER");
 }

@@ -17,6 +17,7 @@ import type { PlatformConfig } from "./types";
 const MAX_ATTEMPTS = 10;
 const DISPATCH_INTERVAL_MS = 800;
 const BUFFER_SWEEP_INTERVAL_MS = 5000;
+const ANTI_ENTROPY_INTERVAL_MS = 15000;
 // Depois deste tempo, uma Activity presa no buffer causal é aplicada mesmo sem
 // a dependência ter chegado (fallback de disponibilidade / consistência
 // eventual — coerente com a escolha AP do projeto).
@@ -136,8 +137,11 @@ function isDeliverable(local: VClock, vm: VClock, origin: string): boolean {
 // Envelope
 // ---------------------------------------------------------------------------
 
-/** Envolve uma Activity AS2 no envelope `_meta`, incrementando o vclock. */
-export function wrap(db: Database, activity: any, inReplyTo?: string | null): Wire {
+/**
+ * Envelopa uma Activity de CONTEÚDO (Create/Update/Delete/Like/Announce),
+ * incrementando o relógio vetorial — é o que entra na ordenação causal (§6.6).
+ */
+export function wrapContent(db: Database, activity: any, inReplyTo?: string | null): Wire {
   const origin = originOf(activity.actor);
   return {
     activity,
@@ -146,6 +150,26 @@ export function wrap(db: Database, activity: any, inReplyTo?: string | null): Wi
       origin,
       vclock: tickVClock(db, origin),
       inReplyTo: inReplyTo ?? null,
+      ts: new Date().toISOString(),
+    },
+  };
+}
+
+/**
+ * Envelopa uma Activity de CONTROLE (Follow/Accept/Reject/Undo). Controle é
+ * ponto-a-ponto e NÃO participa do relógio vetorial de conteúdo: não incrementa
+ * na origem nem é mesclado/reordenado no destino. Isso mantém a sequência de
+ * conteúdo por origem contígua (sem lacunas fantasma) e é o que permite o
+ * catch-up (anti-entropy) detectar corretamente o que faltou.
+ */
+export function wrapControl(db: Database, activity: any): Wire {
+  return {
+    activity,
+    _meta: {
+      msgId: ulid(),
+      origin: originOf(activity.actor),
+      vclock: {},
+      inReplyTo: null,
       ts: new Date().toISOString(),
     },
   };
@@ -289,7 +313,7 @@ export function sendFollow(db: Database, followerUri: string, followeeUri: strin
     actor: followerUri,
     object: followeeUri,
   };
-  const wire = wrap(db, activity);
+  const wire = wrapControl(db, activity);
   enqueueDelivery(db, inboxUrlForActor(followeeUri), wire._meta.msgId, wire);
 }
 
@@ -302,7 +326,7 @@ export function buildUndo(db: Database, actorUri: string, inner: Record<string, 
     actor: actorUri,
     object: inner,
   };
-  return wrap(db, activity);
+  return wrapControl(db, activity);
 }
 
 /** Federa um Unfollow (Undo{Follow}) para a inbox do ator seguido. */
@@ -411,9 +435,12 @@ export function processIncoming(db: Database, config: PlatformConfig, body: any)
   return { status: "buffered" };
 }
 
-/** Finaliza uma mensagem de controle: merge do vclock + marca processada. */
+/**
+ * Finaliza uma mensagem de controle: apenas marca como processada (dedup). NÃO
+ * mescla vclock — controle fica fora do relógio vetorial de conteúdo, para não
+ * criar lacunas fantasma na sequência de conteúdo por origem.
+ */
 function finishControl(db: Database, meta: MetaEnvelope, result: IncomingResult): IncomingResult {
-  mergeVClock(db, meta.vclock);
   markProcessed(db, meta.msgId);
   return result;
 }
@@ -437,7 +464,7 @@ function handleFollow(db: Database, config: PlatformConfig, activity: any): Inco
     actor: followeeUri,
     object: { type: "Follow", actor: followerUri, object: followeeUri },
   };
-  const wire = wrap(db, accept);
+  const wire = wrapControl(db, accept);
   enqueueDelivery(db, inboxUrlForActor(followerUri), wire._meta.msgId, wire);
 
   console.log(`[${config.peerId}] novo seguidor remoto: ${followerUri} -> ${followeeUri}`);
@@ -516,11 +543,11 @@ function applyContent(db: Database, wire: Wire): void {
     return;
   }
 
-  // Create / Like / Announce: insere.
+  // Create / Like / Announce: insere (guardando origem + seq p/ catch-up).
   db.prepare(
     `INSERT OR IGNORE INTO activity
-       (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, published, raw, authorId)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, NULL)`
+       (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, origin, originSeq, published, raw, authorId)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, NULL)`
   ).run(
     ulid(),
     activity.id,
@@ -532,9 +559,72 @@ function applyContent(db: Database, wire: Wire): void {
     extractMeta(object),
     object.inReplyTo ?? _meta.inReplyTo ?? null,
     observeLamport(db, 0),
+    _meta.origin,
+    _meta.vclock[_meta.origin] ?? 0,
     activity.published ?? _meta.ts ?? new Date().toISOString(),
     JSON.stringify(wire)
   );
+}
+
+// ---------------------------------------------------------------------------
+// Anti-entropy / catch-up (§6.10, §7.7)
+// ---------------------------------------------------------------------------
+
+/**
+ * Retorna os envelopes das Activities autoradas por este peer (origin = seu
+ * baseUrl) com originSeq > since, em ordem. Serve o endpoint de catch-up.
+ */
+export function catchupSince(db: Database, origin: string, since: number): Wire[] {
+  const rows = db
+    .prepare(
+      "SELECT raw FROM activity WHERE origin = ? AND originSeq > ? ORDER BY originSeq ASC"
+    )
+    .all(origin, since) as { raw: string }[];
+  const out: Wire[] = [];
+  for (const r of rows) {
+    try {
+      const w = JSON.parse(r.raw) as Wire;
+      if (w && w.activity && w._meta) out.push(w);
+    } catch {
+      /* ignora linhas que não guardam o envelope */
+    }
+  }
+  return out;
+}
+
+/**
+ * Puxa periodicamente de cada peer de origem seguido as Activities que faltam
+ * (desde o último seq conhecido no Vlocal), reprocessando-as. Rede de segurança
+ * contra omissão silenciosa: o que se perdeu na entrega é recuperado aqui.
+ */
+export async function runAntiEntropy(db: Database, config: PlatformConfig): Promise<void> {
+  const self = config.baseUrl;
+  const followees = db
+    .prepare("SELECT DISTINCT followeeActorUri FROM follow")
+    .all() as { followeeActorUri: string }[];
+
+  const origins = new Set<string>();
+  for (const f of followees) {
+    const o = originOf(f.followeeActorUri);
+    if (o && o !== self) origins.add(o);
+  }
+
+  const vc = getVClock(db);
+  for (const origin of origins) {
+    const since = vc[origin] ?? 0;
+    try {
+      const res = await fetch(`${origin}/catchup?since=${since}`, {
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) continue;
+      const body = (await res.json()) as { items?: Wire[] };
+      for (const wire of body.items ?? []) {
+        processIncoming(db, config, wire);
+      }
+    } catch {
+      /* origem indisponível: tenta de novo no próximo ciclo */
+    }
+  }
 }
 
 /** Reavalia o buffer: aplica tudo que se tornou entregável após o merge. */
@@ -593,4 +683,8 @@ export function startFederation(db: Database, config: PlatformConfig): void {
   setInterval(() => {
     sweepBuffer(db, config);
   }, BUFFER_SWEEP_INTERVAL_MS).unref();
+
+  setInterval(() => {
+    void runAntiEntropy(db, config);
+  }, ANTI_ENTROPY_INTERVAL_MS).unref();
 }

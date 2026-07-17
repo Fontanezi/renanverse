@@ -11,11 +11,12 @@ import {
 } from "../activitystreams";
 import {
   nextLamport,
-  wrap,
+  wrapContent,
   fanOutToFollowers,
   sendFollow,
   sendUnfollow,
   buildUndo,
+  catchupSince,
 } from "../federation";
 import { resolveHandleToActorUri } from "../webfinger";
 import { publicKeyPem } from "../httpsig";
@@ -139,8 +140,16 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     const row = db.prepare("SELECT * FROM activity WHERE id = ?").get(id) as ActivityRow;
     const as2 = activityToAS2(BASE_URL, row);
 
-    // Envolve no envelope _meta (msgId + vclock) e replica para os seguidores.
-    fanOutToFollowers(db, wrap(db, as2, inReplyTo));
+    // Envolve no envelope _meta (msgId + vclock), registra origem/seq (catch-up)
+    // e replica para os seguidores.
+    const wire = wrapContent(db, as2, inReplyTo);
+    db.prepare("UPDATE activity SET origin = ?, originSeq = ?, raw = ? WHERE id = ?").run(
+      BASE_URL,
+      wire._meta.vclock[BASE_URL] ?? 0,
+      JSON.stringify(wire),
+      id
+    );
+    fanOutToFollowers(db, wire);
 
     res.status(201).json(as2);
   });
@@ -268,6 +277,14 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
 
     res.json({ undone: targetUri, type: row.type });
+  });
+
+  // GET /catchup?since=N — anti-entropy: devolve os envelopes das Activities
+  // autoradas por este peer (origin = baseUrl) com originSeq > since, para que
+  // um peer que ficou para trás recupere o que perdeu (§6.10/§7.7).
+  router.get("/catchup", (req, res) => {
+    const since = Number(req.query.since ?? 0) || 0;
+    res.json({ origin: BASE_URL, since, items: catchupSince(db, BASE_URL, since) });
   });
 
   // GET /users/:id/feed — linha do tempo: Activities dos atores que :id segue
