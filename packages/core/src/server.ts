@@ -4,6 +4,7 @@ import { createUsersRouter } from "./routes/users";
 import { createInboxRouter } from "./routes/inbox";
 import { createWebfingerRouter } from "./routes/webfinger";
 import { startFederation } from "./federation";
+import { startRegistration } from "./registry";
 import { ensureKeyPair } from "./httpsig";
 import type { PlatformConfig } from "./types";
 
@@ -40,6 +41,9 @@ export function createApp(config: PlatformConfig): Express {
 
   // Dispatcher de entregas + sweeper do buffer causal (loop de fundo do peer).
   startFederation(db, config);
+
+  // Registro periódico no(s) super peer(s) para descoberta (se configurados).
+  startRegistration(db, config);
 
   return app;
 }

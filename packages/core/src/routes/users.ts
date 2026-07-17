@@ -22,7 +22,7 @@ import {
   recordLocalContent,
   catchupSince,
 } from "../federation";
-import { resolveHandleToActorUri } from "../webfinger";
+import { resolveHandle } from "../registry";
 import { publicKeyPem } from "../httpsig";
 import type { PlatformConfig } from "../types";
 
@@ -163,7 +163,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     if (handles.length) {
       const tags: { type: "Mention"; href: string }[] = [];
       for (const h of handles) {
-        const href = await resolveHandleToActorUri(h);
+        const href = await resolveHandle(config, h);
         if (href) tags.push({ type: "Mention", href });
       }
       if (tags.length) (as2.object as Record<string, unknown>).tag = tags;
@@ -207,7 +207,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     // Sem a URI direta: resolve o handle via WebFinger no peer remoto.
     if (!followeeUri && parsed.data.handle) {
-      followeeUri = await resolveHandleToActorUri(parsed.data.handle);
+      followeeUri = await resolveHandle(config, parsed.data.handle);
       if (!followeeUri) {
         return res
           .status(404)
@@ -258,7 +258,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     const followerUri = actorUri(BASE_URL, person.id);
     let followeeUri = parsed.data.actorUri ?? null;
     if (!followeeUri && parsed.data.handle) {
-      followeeUri = await resolveHandleToActorUri(parsed.data.handle);
+      followeeUri = await resolveHandle(config, parsed.data.handle);
       if (!followeeUri) {
         return res
           .status(404)

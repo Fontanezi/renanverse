@@ -10,6 +10,7 @@
     "dev:twitter": "npm run dev -w apps/twitter",
     "dev:instagram": "npm run dev -w apps/instagram",
     "dev:reddit": "npm run dev -w apps/reddit",
+    "dev:superpeer": "npm run dev -w apps/superpeer",
     "build": "npm run build -w packages/core && npm run build --workspaces --if-present"
   }
 }

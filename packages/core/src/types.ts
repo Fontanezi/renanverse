@@ -42,6 +42,12 @@ export interface PlatformConfig {
    */
   createActivitySchema: ZodType<ActivityInput, ZodTypeDef, unknown>;
   /**
+   * Super peers do ecossistema (base URLs). Usado para o peer se registrar no
+   * diretório de descoberta e resolver handles remotos. Se vazio, cai no
+   * WebFinger direto. Default lido de process.env.SUPERPEERS quando ausente.
+   */
+  superPeers?: string[];
+  /**
    * Hook opcional para o app registrar rotas próprias, específicas da
    * plataforma, sem alterar o núcleo. Chamado por `createApp` depois de montar
    * as rotas genéricas, com o `Express` e o `Database` já prontos.

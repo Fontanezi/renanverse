@@ -3,6 +3,7 @@ export * from "./activitystreams";
 export * from "./types";
 export * from "./federation";
 export * from "./webfinger";
+export * from "./registry";
 export * from "./httpsig";
 export * from "./server";
 export { createUsersRouter } from "./routes/users";
