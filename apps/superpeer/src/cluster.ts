@@ -41,11 +41,44 @@ export class Cluster {
     return this.leaderId === this.selfId;
   }
 
+  /** URL do líder atual (a própria, se eu for o líder), ou null se desconhecido. */
+  leaderUrl(): string | null {
+    if (this.leaderId === null) return null;
+    if (this.leaderId === this.selfId) return this.config.baseUrl;
+    return this.peers.find((p) => p.id === this.leaderId)?.url ?? null;
+  }
+
+  /** Tamanho da maioria (quórum) num cluster de N = peers + self. Ex.: N=3 -> 2. */
+  quorumSize(): number {
+    const n = this.peers.length + 1;
+    return Math.floor(n / 2) + 1;
+  }
+
+  /** Replica um conjunto de entradas aos seguidores vivos; retorna nº de ACKs. */
+  async replicate(entries: unknown[]): Promise<number> {
+    let acks = 0;
+    await Promise.all(
+      this.peers
+        .filter((p) => p.alive)
+        .map(async (p) => {
+          const res = await rpc(`${p.url}/replicate`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ entries }),
+          });
+          if (res && res.ok) acks++;
+        })
+    );
+    return acks;
+  }
+
   status() {
     return {
       id: this.selfId,
       leaderId: this.leaderId,
+      leaderUrl: this.leaderUrl(),
       isLeader: this.isLeader(),
+      quorum: this.quorumSize(),
       peers: this.peers.map((p) => ({ url: p.url, id: p.id, alive: p.alive })),
     };
   }
@@ -145,6 +178,11 @@ export class Cluster {
 
   /** Recebeu o anúncio de novo líder. */
   onCoordinator(leaderId: number): void {
+    // Um ID MENOR se declarou líder mas eu tenho prioridade: disputo (Bully).
+    if (leaderId < this.selfId) {
+      void this.startElection();
+      return;
+    }
     this.leaderId = leaderId;
     this.electing = false;
     console.log(`[super-peer #${this.selfId}] novo lider: #${leaderId}`);

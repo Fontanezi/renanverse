@@ -34,27 +34,45 @@ function localActors(db: Database, config: PlatformConfig): { handle: string; ac
   }));
 }
 
-/** Registra os atores locais em todos os super peers configurados. */
+/** Descobre a URL do super peer líder consultando /status em qualquer um. */
+async function findLeaderUrl(supers: string[]): Promise<string | null> {
+  for (const sp of supers) {
+    try {
+      const res = await fetch(`${sp}/status`, { signal: AbortSignal.timeout(800) });
+      if (res.ok) {
+        const s = (await res.json()) as { leaderUrl?: string | null };
+        if (s.leaderUrl) return s.leaderUrl;
+      }
+    } catch {
+      /* tenta o próximo */
+    }
+  }
+  return null;
+}
+
+/**
+ * Registra os atores locais no super peer LÍDER (escrita coordenada por quórum).
+ * Se não houver líder/quórum no momento, ignora — tenta de novo no próximo ciclo.
+ */
 export async function registerWithSuperPeers(db: Database, config: PlatformConfig): Promise<void> {
   const supers = superPeerUrls(config);
   if (!supers.length) return;
   const actors = localActors(db, config);
   if (!actors.length) return;
 
-  const body = JSON.stringify({ peer: config.baseUrl, actors });
-  await Promise.all(
-    supers.map(async (sp) => {
-      try {
-        await fetch(`${sp}/register`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body,
-        });
-      } catch {
-        /* super peer indisponível: tenta de novo no próximo ciclo */
-      }
-    })
-  );
+  const leader = await findLeaderUrl(supers);
+  if (!leader) return;
+
+  try {
+    await fetch(`${leader}/register`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ peer: config.baseUrl, actors }),
+      signal: AbortSignal.timeout(1500),
+    });
+  } catch {
+    /* líder indisponível ou sem quórum: tenta de novo no próximo ciclo */
+  }
 }
 
 /** Resolve um handle consultando os super peers (primeiro que responder vence). */

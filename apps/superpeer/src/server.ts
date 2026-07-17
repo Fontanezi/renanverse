@@ -51,19 +51,54 @@ export function createSuperPeerApp(
   });
 
   // POST /register — um peer anuncia seus atores { peer, actors:[{handle,actorUri}] }.
-  app.post("/register", (req, res) => {
+  // Escrita no diretório é COORDENADA: só o líder escreve, replicando aos
+  // seguidores e confirmando com MAIORIA (quórum 2k+1). Sem maioria, recusa
+  // (503) — a coordenação suspende escritas para não divergir (CP).
+  app.post("/register", async (req, res) => {
     const { peer, actors } = req.body ?? {};
     if (typeof peer !== "string" || !Array.isArray(actors)) {
       return res.status(400).json({ error: "esperado { peer, actors:[{handle,actorUri}] }" });
     }
-    let n = 0;
-    for (const a of actors) {
-      if (a && typeof a.handle === "string" && typeof a.actorUri === "string") {
-        directory.upsert(a.handle, a.actorUri, peer);
-        n++;
+    const now = new Date().toISOString();
+    const entries = actors
+      .filter((a) => a && typeof a.handle === "string" && typeof a.actorUri === "string")
+      .map((a) => ({ handle: a.handle, actorUri: a.actorUri, peer, updatedAt: now }));
+    if (!entries.length) return res.json({ registered: 0 });
+
+    if (cluster.isLeader()) {
+      const acks = 1 + (await cluster.replicate(entries)); // self + seguidores
+      const need = cluster.quorumSize();
+      if (acks < need) {
+        return res
+          .status(503)
+          .json({ error: "sem quorum para escrever no diretorio", acks, need });
       }
+      directory.merge(entries);
+      return res.json({ committed: true, acks, need, directorySize: directory.size });
     }
-    res.json({ registered: n, directorySize: directory.size });
+
+    // Não sou o líder: encaminho a escrita para ele.
+    const leader = cluster.leaderUrl();
+    if (!leader) return res.status(503).json({ error: "sem lider no momento" });
+    try {
+      const r = await fetch(`${leader}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ peer, actors }),
+        signal: AbortSignal.timeout(1500),
+      });
+      const body = await r.json().catch(() => ({}));
+      return res.status(r.status).json(body);
+    } catch {
+      return res.status(503).json({ error: "falha ao encaminhar ao lider" });
+    }
+  });
+
+  // POST /replicate — o líder empurra entradas do diretório para os seguidores.
+  app.post("/replicate", (req, res) => {
+    const entries = req.body?.entries;
+    if (Array.isArray(entries)) directory.merge(entries);
+    res.json({ ok: true, directorySize: directory.size });
   });
 
   // GET /resolve?handle=usuario@host — descoberta: handle -> ator + peer.
