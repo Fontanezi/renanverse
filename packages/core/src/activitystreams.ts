@@ -40,11 +40,17 @@ export function actorUri(baseUrl: string, personId: string): string {
   return `${baseUrl}/users/${personId}`;
 }
 
-/** Serializa um Person do banco para o objeto AS2 "Person". */
-export function personToAS2(baseUrl: string, p: PersonRow) {
+/**
+ * Serializa um Person do banco para o objeto AS2 "Person". Quando `publicKeyPem`
+ * é informado, publica o bloco `publicKey` (usado pela verificação de
+ * HTTP Signatures do peer que recebe as entregas deste ator).
+ */
+export function personToAS2(baseUrl: string, p: PersonRow, publicKeyPem?: string) {
   const uri = actorUri(baseUrl, p.id);
   return {
-    "@context": ["https://www.w3.org/ns/activitystreams"],
+    "@context": publicKeyPem
+      ? ["https://www.w3.org/ns/activitystreams", "https://w3id.org/security/v1"]
+      : ["https://www.w3.org/ns/activitystreams"],
     type: "Person",
     id: uri,
     preferredUsername: p.preferredUsername,
@@ -55,6 +61,9 @@ export function personToAS2(baseUrl: string, p: PersonRow) {
     followers: `${uri}/followers`,
     inbox: `${uri}/inbox`,
     outbox: `${uri}/outbox`,
+    publicKey: publicKeyPem
+      ? { id: `${uri}#main-key`, owner: uri, publicKeyPem }
+      : undefined,
   };
 }
 

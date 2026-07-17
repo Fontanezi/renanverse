@@ -11,6 +11,7 @@
 
 import type { Database } from "better-sqlite3";
 import { ulid } from "ulid";
+import { buildSignatureHeaders } from "./httpsig";
 import type { PlatformConfig } from "./types";
 
 const MAX_ATTEMPTS = 10;
@@ -106,9 +107,21 @@ async function dispatchPending(db: Database, config: PlatformConfig): Promise<vo
 
   for (const d of due) {
     try {
+      // Assina a entrega (HTTP Signatures). O ator do payload é sempre local a
+      // este peer, então assinamos com a chave privada do peer.
+      let sigHeaders: Record<string, string> = {};
+      try {
+        const actor = JSON.parse(d.payload)?.actor;
+        if (typeof actor === "string") {
+          sigHeaders = buildSignatureHeaders(db, actor, d.targetInbox, d.payload);
+        }
+      } catch {
+        /* payload é sempre JSON válido; se algo falhar, segue sem assinatura */
+      }
+
       const res = await fetch(d.targetInbox, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...sigHeaders },
         body: d.payload,
       });
       if (res.ok) {

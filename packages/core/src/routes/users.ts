@@ -17,6 +17,7 @@ import {
   buildUndo,
 } from "../federation";
 import { resolveHandleToActorUri } from "../webfinger";
+import { publicKeyPem } from "../httpsig";
 import type { PlatformConfig } from "../types";
 
 const createPersonSchema = z.object({
@@ -35,6 +36,7 @@ const createPersonSchema = z.object({
 export function createUsersRouter(db: Database, config: PlatformConfig): Router {
   const router = Router();
   const BASE_URL = config.baseUrl;
+  const PUBLIC_KEY = publicKeyPem(db); // chave pública do peer, publicada no Person
 
   // POST /users — cria um novo Person neste peer
   router.post("/users", (req, res) => {
@@ -59,7 +61,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     ).run(id, preferredUsername, name, summary ?? null, icon ?? null, createdAt);
 
     const row = db.prepare("SELECT * FROM person WHERE id = ?").get(id) as PersonRow;
-    res.status(201).json(personToAS2(BASE_URL, row));
+    res.status(201).json(personToAS2(BASE_URL, row, PUBLIC_KEY));
   });
 
   // GET /users/:id — perfil no formato AS2 Person
@@ -68,7 +70,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       .prepare("SELECT * FROM person WHERE id = ?")
       .get(req.params.id) as PersonRow | undefined;
     if (!row) return res.status(404).json({ error: "Person não encontrado" });
-    res.json(personToAS2(BASE_URL, row));
+    res.json(personToAS2(BASE_URL, row, PUBLIC_KEY));
   });
 
   // GET /users/:id/outbox — lista as Activities publicadas por esse Person

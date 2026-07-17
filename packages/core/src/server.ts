@@ -4,13 +4,23 @@ import { createUsersRouter } from "./routes/users";
 import { createInboxRouter } from "./routes/inbox";
 import { createWebfingerRouter } from "./routes/webfinger";
 import { startFederation } from "./federation";
+import { ensureKeyPair } from "./httpsig";
 import type { PlatformConfig } from "./types";
 
 /** Monta o Express app de um peer a partir da config da plataforma. */
 export function createApp(config: PlatformConfig): Express {
   const db = createDb(config.dbPath);
+  ensureKeyPair(db); // gera o par RSA do peer na primeira execução
+
   const app = express();
-  app.use(express.json());
+  // Captura o corpo cru para validar o Digest das entregas assinadas.
+  app.use(
+    express.json({
+      verify: (req, _res, buf) => {
+        (req as { rawBody?: string }).rawBody = buf.toString("utf8");
+      },
+    })
+  );
 
   app.get("/", (_req, res) => {
     res.json({
