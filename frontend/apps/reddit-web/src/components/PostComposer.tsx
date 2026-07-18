@@ -7,13 +7,18 @@ interface PostComposerProps {
     attachmentUrl?: string;
     objectType: "Link" | "Page";
   }) => void;
+  initialTitle?: string;
+  initialContent?: string;
+  initialUrl?: string;
+  editingId?: string;
+  disabled?: boolean;
 }
 
-export function PostComposer({ onSubmit }: PostComposerProps) {
-  const [title, setTitle] = useState("");
-  const [content, setContent] = useState("");
-  const [url, setUrl] = useState("");
-  const [type, setType] = useState<"Page" | "Link">("Page");
+export function PostComposer({ onSubmit, initialTitle, initialContent, initialUrl, editingId, disabled }: PostComposerProps) {
+  const [title, setTitle] = useState(initialTitle ?? "");
+  const [content, setContent] = useState(initialContent ?? "");
+  const [url, setUrl] = useState(initialUrl ?? "");
+  const [type, setType] = useState<"Page" | "Link">(initialUrl ? "Link" : "Page");
 
   const canSubmit = title.trim() && (type === "Page" || url.trim());
 
@@ -25,14 +30,21 @@ export function PostComposer({ onSubmit }: PostComposerProps) {
       attachmentUrl: url.trim() || undefined,
       objectType: type,
     });
-    setTitle("");
-    setContent("");
-    setUrl("");
-    setType("Page");
+    if (!editingId) {
+      setTitle("");
+      setContent("");
+      setUrl("");
+      setType("Page");
+    }
   };
 
   return (
     <div>
+      {editingId && (
+        <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
+          Editando post
+        </p>
+      )}
       <div style={{ display: "flex", gap: 8, marginBottom: 8 }}>
         <button
           onClick={() => setType("Page")}
@@ -87,7 +99,7 @@ export function PostComposer({ onSubmit }: PostComposerProps) {
 
       <button
         onClick={handleSubmit}
-        disabled={!canSubmit}
+        disabled={disabled || !canSubmit}
         style={{
           width: "100%", padding: 10, marginTop: 12,
           border: "none", borderRadius: 8,
@@ -96,7 +108,7 @@ export function PostComposer({ onSubmit }: PostComposerProps) {
           cursor: canSubmit ? "pointer" : "default",
         }}
       >
-        Publicar
+        {editingId ? "Salvar" : "Publicar"}
       </button>
     </div>
   );

@@ -21,8 +21,21 @@ export function createActivityApi(api: RawClient) {
     like: (userId: string, objectUri: string) =>
       api.post<Activity>(`/users/${userId}/likes`, { object: objectUri }),
 
+    unlike: (userId: string, objectUri: string) =>
+      api.del<{ status: string }>(`/users/${userId}/likes`, { object: objectUri }),
+
     announce: (userId: string, objectUri: string) =>
       api.post<Activity>(`/users/${userId}/announces`, { object: objectUri }),
+
+    unannounce: (userId: string, objectUri: string) =>
+      api.del<{ status: string }>(`/users/${userId}/announces`, { object: objectUri }),
+
+    undo: (userId: string, objectType: string, objectUri: string) =>
+      api.post<Activity>(`/users/${userId}/outbox`, {
+        type: "Undo",
+        objectType,
+        object: objectUri,
+      }),
 
     mentions: (userId: string) =>
       api.get<FeedResponse>(`/users/${userId}/mentions`),

@@ -19,6 +19,15 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
     }).catch(() => setLoading(false));
   }, []);
 
+  const handleDelete = async (uri: string) => {
+    try {
+      await api.activities.remove(userId, uri.split("/").pop()!);
+      setPosts((prev) => prev.filter((a: any) => a.id !== uri));
+    } catch (e) {
+      alert("Erro ao excluir: " + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
   return (
     <div>
       <div style={{ padding: "24px 24px 16px", borderBottom: "1px solid #eee" }}>
@@ -42,7 +51,13 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
       <h3 style={{ padding: "12px 24px", margin: 0, borderBottom: "1px solid #eee", fontSize: "1rem" }}>
         Suas publicações
       </h3>
-      <Feed items={posts} loading={loading} emptyMessage="Nenhuma publicação ainda." />
+      <Feed
+        items={posts}
+        loading={loading}
+        onDelete={handleDelete}
+        isOwn={true}
+        emptyMessage="Nenhuma publicação ainda."
+      />
     </div>
   );
 }

@@ -7,10 +7,13 @@ interface FeedProps {
   onLike?: (uri: string) => void;
   onShare?: (uri: string) => void;
   onReply?: (activity: Activity) => void;
+  onEdit?: (activity: Activity) => void;
+  onDelete?: (uri: string) => void;
+  isOwn?: boolean;
   emptyMessage?: string;
 }
 
-export function Feed({ items, loading, onLike, onShare, onReply, emptyMessage }: FeedProps) {
+export function Feed({ items, loading, onLike, onShare, onReply, onEdit, onDelete, isOwn, emptyMessage }: FeedProps) {
   if (loading) {
     return <div style={{ padding: 24, textAlign: "center", color: "#888" }}>Carregando...</div>;
   }
@@ -32,6 +35,9 @@ export function Feed({ items, loading, onLike, onShare, onReply, emptyMessage }:
           onLike={onLike}
           onShare={onShare}
           onReply={onReply}
+          onEdit={onEdit}
+          onDelete={onDelete}
+          isOwn={isOwn}
         />
       ))}
     </div>

@@ -2,21 +2,32 @@ import { useState } from "react";
 
 interface PostComposerProps {
   onSubmit: (attachmentUrl: string, caption?: string) => void;
+  initialUrl?: string;
+  initialCaption?: string;
+  editingId?: string;
+  disabled?: boolean;
 }
 
-export function PostComposer({ onSubmit }: PostComposerProps) {
-  const [url, setUrl] = useState("");
-  const [caption, setCaption] = useState("");
+export function PostComposer({ onSubmit, initialUrl, initialCaption, editingId, disabled }: PostComposerProps) {
+  const [url, setUrl] = useState(initialUrl ?? "");
+  const [caption, setCaption] = useState(initialCaption ?? "");
 
   const handleSubmit = () => {
     if (!url.trim()) return;
     onSubmit(url.trim(), caption.trim() || undefined);
-    setUrl("");
-    setCaption("");
+    if (!editingId) {
+      setUrl("");
+      setCaption("");
+    }
   };
 
   return (
     <div>
+      {editingId && (
+        <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
+          Editando publicação
+        </p>
+      )}
       <input
         type="url"
         value={url}
@@ -44,7 +55,7 @@ export function PostComposer({ onSubmit }: PostComposerProps) {
       )}
       <button
         onClick={handleSubmit}
-        disabled={!url.trim()}
+        disabled={disabled || !url.trim()}
         style={{
           width: "100%",
           padding: "10px",
@@ -57,7 +68,7 @@ export function PostComposer({ onSubmit }: PostComposerProps) {
           cursor: url.trim() ? "pointer" : "default",
         }}
       >
-        Publicar
+        {editingId ? "Salvar" : "Publicar"}
       </button>
     </div>
   );

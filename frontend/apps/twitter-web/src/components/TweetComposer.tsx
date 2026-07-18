@@ -4,10 +4,13 @@ interface TweetComposerProps {
   onSubmit: (content: string) => void;
   maxChars: number;
   placeholder?: string;
+  initialContent?: string;
+  editingId?: string;
+  disabled?: boolean;
 }
 
-export function TweetComposer({ onSubmit, maxChars, placeholder }: TweetComposerProps) {
-  const [text, setText] = useState("");
+export function TweetComposer({ onSubmit, maxChars, placeholder, initialContent, editingId, disabled }: TweetComposerProps) {
+  const [text, setText] = useState(initialContent ?? "");
   const remaining = maxChars - text.length;
   const isOver = remaining < 0;
 
@@ -19,6 +22,11 @@ export function TweetComposer({ onSubmit, maxChars, placeholder }: TweetComposer
 
   return (
     <div>
+      {editingId && (
+        <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
+          Editando post
+        </p>
+      )}
       <textarea
         value={text}
         onChange={(e) => setText(e.target.value)}
@@ -49,7 +57,7 @@ export function TweetComposer({ onSubmit, maxChars, placeholder }: TweetComposer
         </span>
         <button
           onClick={handleSubmit}
-          disabled={!text.trim() || isOver}
+          disabled={disabled || !text.trim() || isOver}
           style={{
             padding: "8px 20px",
             border: "none",
@@ -60,7 +68,7 @@ export function TweetComposer({ onSubmit, maxChars, placeholder }: TweetComposer
             cursor: text.trim() && !isOver ? "pointer" : "default",
           }}
         >
-          Publicar
+          {editingId ? "Salvar" : "Publicar"}
         </button>
       </div>
     </div>

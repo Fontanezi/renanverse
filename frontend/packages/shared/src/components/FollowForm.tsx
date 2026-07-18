@@ -2,10 +2,11 @@ import { useState } from "react";
 
 interface FollowFormProps {
   onFollow: (handle: string) => Promise<void>;
+  onUnfollow?: (handle: string) => Promise<void>;
   backendPort?: string;
 }
 
-export function FollowForm({ onFollow, backendPort }: FollowFormProps) {
+export function FollowForm({ onFollow, onUnfollow, backendPort }: FollowFormProps) {
   const [handle, setHandle] = useState("");
   const [loading, setLoading] = useState(false);
   const [result, setResult] = useState<{ ok: boolean; message: string } | null>(null);
@@ -30,6 +31,22 @@ export function FollowForm({ onFollow, backendPort }: FollowFormProps) {
         ok: false,
         message: `✗ ${display}`,
       });
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleUnfollow = async () => {
+    if (!onUnfollow || !handle.trim()) return;
+    setLoading(true);
+    setResult(null);
+    try {
+      await onUnfollow(handle.trim());
+      setResult({ ok: true, message: `✓ Você deixou de seguir ${handle.trim()}` });
+      setHandle("");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      setResult({ ok: false, message: `✗ ${msg}` });
     } finally {
       setLoading(false);
     }
@@ -75,6 +92,24 @@ export function FollowForm({ onFollow, backendPort }: FollowFormProps) {
         >
           {loading ? "Seguindo..." : "Seguir"}
         </button>
+        {onUnfollow && handle.trim() && (
+          <button
+            type="button"
+            onClick={handleUnfollow}
+            disabled={loading}
+            style={{
+              padding: "10px 20px",
+              border: "1px solid #d32f2f",
+              borderRadius: 8,
+              background: "#fff",
+              color: "#d32f2f",
+              fontWeight: 600,
+              cursor: loading ? "default" : "pointer",
+            }}
+          >
+            Deixar de seguir
+          </button>
+        )}
       </div>
       {result && (
         <p style={{
