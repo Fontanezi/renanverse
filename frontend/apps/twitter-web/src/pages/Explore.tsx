@@ -1,4 +1,4 @@
-import { FollowForm } from "@renanverse-frontend/shared";
+import { FollowForm, FollowRequests } from "@renanverse-frontend/shared";
 import type { ApiClient, Person } from "@renanverse-frontend/shared";
 
 interface ExplorePageProps {
@@ -11,7 +11,8 @@ export function ExplorePage({ api, user }: ExplorePageProps) {
   const userHandle = `${user.preferredUsername}@localhost:3001`;
 
   const handleFollow = async (handle: string) => {
-    await api.users.follow(userId, { handle });
+    const res = await api.users.follow(userId, { handle });
+    return res;
   };
 
   return (
@@ -37,6 +38,7 @@ export function ExplorePage({ api, user }: ExplorePageProps) {
         </span>
       </div>
 
+      <FollowRequests api={api} userId={userId} />
       <FollowForm onFollow={handleFollow} backendPort="3001" />
 
       <div style={{ padding: "16px 24px", color: "#888", fontSize: "0.875rem", lineHeight: 1.6 }}>

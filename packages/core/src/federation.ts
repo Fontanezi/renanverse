@@ -404,6 +404,19 @@ export function buildDelete(db: Database, actorUri: string, targetUri: string): 
   return wrapContent(db, activity);
 }
 
+/** Federa um `Accept{Follow}` para a inbox do seguidor. */
+export function sendAccept(db: Database, followeeUri: string, followerUri: string): void {
+  const activity = {
+    "@context": ["https://www.w3.org/ns/activitystreams"],
+    id: `${followeeUri}/accepts/${ulid()}`,
+    type: "Accept",
+    actor: followeeUri,
+    object: { type: "Follow", actor: followerUri, object: followeeUri },
+  };
+  const wire = wrapControl(db, activity);
+  enqueueDelivery(db, inboxUrlForActor(followerUri), wire._meta.msgId, wire);
+}
+
 /** Federa um `Reject{Follow}` para a inbox do seguidor (remove-o como follower). */
 export function sendReject(db: Database, followeeUri: string, followerUri: string): void {
   const activity = {
@@ -482,8 +495,7 @@ export function processIncoming(db: Database, config: PlatformConfig, body: any)
     case "Follow":
       return finishControl(db, _meta, handleFollow(db, config, activity));
     case "Accept":
-      console.log(`[${config.peerId}] Follow aceito por`, activity.actor);
-      return finishControl(db, _meta, { status: "accept" });
+      return finishControl(db, _meta, handleAccept(db, config, activity));
     case "Reject":
       return finishControl(db, _meta, handleReject(db, config, activity));
     case "Undo":
@@ -529,24 +541,34 @@ function handleFollow(db: Database, config: PlatformConfig, activity: any): Inco
     typeof activity.object === "string" ? activity.object : activity.object?.id;
   if (!followerUri || !followeeUri) return { status: "ignored", detail: "Follow sem actor/object" };
 
-  db.prepare(
-    `INSERT OR IGNORE INTO follow (id, followerActorUri, followeeActorUri, createdAt)
-     VALUES (?, ?, ?, ?)`
-  ).run(ulid(), followerUri, followeeUri, new Date().toISOString());
+  const existing = db.prepare(
+    "SELECT status FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?"
+  ).get(followerUri, followeeUri) as { status: string } | undefined;
 
-  // Auto-accept: confirma o follow de volta para a inbox do seguidor.
-  const accept = {
-    "@context": ["https://www.w3.org/ns/activitystreams"],
-    id: `${followeeUri}/accepts/${ulid()}`,
-    type: "Accept",
-    actor: followeeUri,
-    object: { type: "Follow", actor: followerUri, object: followeeUri },
-  };
-  const wire = wrapControl(db, accept);
-  enqueueDelivery(db, inboxUrlForActor(followerUri), wire._meta.msgId, wire);
+  if (!existing) {
+    db.prepare(
+      `INSERT INTO follow (id, followerActorUri, followeeActorUri, status, createdAt)
+       VALUES (?, ?, ?, 'pending', ?)`
+    ).run(ulid(), followerUri, followeeUri, new Date().toISOString());
+  }
 
-  console.log(`[${config.peerId}] novo seguidor remoto: ${followerUri} -> ${followeeUri}`);
+  console.log(`[${config.peerId}] solicitação de follow de ${followerUri} -> ${followeeUri}`);
   return { status: "follow" };
+}
+
+/** Accept de um Follow: atualiza o status de 'pending' para 'accepted'. */
+function handleAccept(db: Database, config: PlatformConfig, activity: any): IncomingResult {
+  const followeeUri: string | undefined = activity.actor;
+  const inner = activity.object;
+  const followerUri: string | undefined =
+    inner?.actor ?? (typeof inner === "string" ? undefined : undefined);
+  if (followeeUri && followerUri) {
+    db.prepare(
+      "UPDATE follow SET status = 'accepted' WHERE followerActorUri = ? AND followeeActorUri = ?"
+    ).run(followerUri, followeeUri);
+    console.log(`[${config.peerId}] Follow aceito: ${followerUri} -> ${followeeUri}`);
+  }
+  return { status: "accept" };
 }
 
 /** Reject de um Follow: remove o follow que havíamos registrado otimisticamente. */

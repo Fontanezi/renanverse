@@ -135,6 +135,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
         onEdit={handleEditClick}
         onDelete={handleDelete}
         isOwn={true}
+        actorNames={{ [user.id]: user.preferredUsername }}
         emptyMessage="Nenhuma foto no feed. Siga outros usuários!"
       />
     </div>

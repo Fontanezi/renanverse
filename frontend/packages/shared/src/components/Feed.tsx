@@ -11,9 +11,10 @@ interface FeedProps {
   onDelete?: (uri: string) => void;
   isOwn?: boolean;
   emptyMessage?: string;
+  actorNames?: Record<string, string>;
 }
 
-export function Feed({ items, loading, onLike, onShare, onReply, onEdit, onDelete, isOwn, emptyMessage }: FeedProps) {
+export function Feed({ items, loading, onLike, onShare, onReply, onEdit, onDelete, isOwn, emptyMessage, actorNames }: FeedProps) {
   if (loading) {
     return <div style={{ padding: 24, textAlign: "center", color: "#888" }}>Carregando...</div>;
   }
@@ -38,6 +39,7 @@ export function Feed({ items, loading, onLike, onShare, onReply, onEdit, onDelet
           onEdit={onEdit}
           onDelete={onDelete}
           isOwn={isOwn}
+          actorNames={actorNames}
         />
       ))}
     </div>

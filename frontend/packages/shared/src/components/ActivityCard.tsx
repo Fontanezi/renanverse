@@ -8,6 +8,7 @@ interface ActivityCardProps {
   onEdit?: (activity: Activity) => void;
   onDelete?: (uri: string) => void;
   isOwn?: boolean;
+  actorNames?: Record<string, string>;
 }
 
 function renderContent(text: string) {
@@ -34,9 +35,11 @@ function renderContent(text: string) {
   });
 }
 
-export function ActivityCard({ activity, onLike, onShare, onReply, onEdit, onDelete, isOwn }: ActivityCardProps) {
+export function ActivityCard({ activity, onLike, onShare, onReply, onEdit, onDelete, isOwn, actorNames }: ActivityCardProps) {
   const obj = activity.object;
-  const actorId = activity.actor?.split("/users/")[1] ?? activity.actor;
+  const actorUri = activity.actor;
+  const actorId = actorUri?.split("/users/")[1] ?? actorUri;
+  const displayName = actorNames?.[actorUri ?? ""] ?? (actorUri ? actorUri.split("//")[1] ?? actorUri : actorId);
   const attachmentUrl = obj?.attachment ?? obj?.attachmentUrl;
 
   return (
@@ -56,10 +59,10 @@ export function ActivityCard({ activity, onLike, onShare, onReply, onEdit, onDel
           fontWeight: 700,
           fontSize: "0.875rem",
         }}>
-          {actorId?.[0]?.toUpperCase() ?? "?"}
+          {displayName?.[0]?.toUpperCase() ?? "?"}
         </div>
         <div>
-          <strong style={{ fontSize: "0.875rem" }}>@{actorId}</strong>
+          <strong style={{ fontSize: "0.875rem" }}>@{displayName}</strong>
           <span style={{ fontSize: "0.75rem", color: "#888", marginLeft: 8 }}>
             {activity.published ? new Date(activity.published).toLocaleString() : ""}
           </span>

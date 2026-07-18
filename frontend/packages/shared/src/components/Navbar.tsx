@@ -14,7 +14,12 @@ export function Navbar({ title, userId, onLogout }: NavbarProps) {
       borderBottom: "1px solid #e0e0e0",
       background: "#fff",
     }}>
-      <h1 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700 }}>{title}</h1>
+      <div style={{ display: "flex", gap: 16, alignItems: "center" }}>
+        <h1 style={{ margin: 0, fontSize: "1.25rem", fontWeight: 700 }}>{title}</h1>
+        <a href="/" style={{ fontSize: "0.875rem", color: "#1a73e8", textDecoration: "none" }}>Início</a>
+        <a href="/explore" style={{ fontSize: "0.875rem", color: "#1a73e8", textDecoration: "none" }}>Explorar</a>
+        <a href="/profile" style={{ fontSize: "0.875rem", color: "#1a73e8", textDecoration: "none" }}>Perfil</a>
+      </div>
       <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
         {userId && <span style={{ fontSize: "0.875rem", color: "#666" }}>{userId}</span>}
         {onLogout && (

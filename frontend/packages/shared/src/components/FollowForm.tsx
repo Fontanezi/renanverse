@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 interface FollowFormProps {
-  onFollow: (handle: string) => Promise<void>;
+  onFollow: (handle: string) => Promise<{ status: string } | void>;
   onUnfollow?: (handle: string) => Promise<void>;
   backendPort?: string;
 }
@@ -17,8 +17,12 @@ export function FollowForm({ onFollow, onUnfollow, backendPort }: FollowFormProp
     setLoading(true);
     setResult(null);
     try {
-      await onFollow(handle.trim());
-      setResult({ ok: true, message: `✓ Agora você segue ${handle.trim()}` });
+      const res = await onFollow(handle.trim());
+      if (res?.status === "pending") {
+        setResult({ ok: true, message: `⏳ Solicitação enviada para ${handle.trim()}` });
+      } else {
+        setResult({ ok: true, message: `✓ Agora você segue ${handle.trim()}` });
+      }
       setHandle("");
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);

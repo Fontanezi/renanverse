@@ -29,6 +29,7 @@ export function createDb(dbPath: string): Database.Database {
       id                TEXT PRIMARY KEY,
       followerActorUri  TEXT NOT NULL,
       followeeActorUri  TEXT NOT NULL,
+      status            TEXT NOT NULL DEFAULT 'accepted',
       createdAt         TEXT NOT NULL,
       UNIQUE(followerActorUri, followeeActorUri)
     );
@@ -103,6 +104,7 @@ export function createDb(dbPath: string): Database.Database {
 
   migrateActivityColumns(db);
   migrateBufferShape(db);
+  migrateFollowStatus(db);
 
   return db;
 }
@@ -149,4 +151,13 @@ function migrateActivityColumns(db: Database.Database): void {
   // origem no momento da publicação, usados para o catch-up "desde o seq N".
   add("origin", "origin TEXT");
   add("originSeq", "originSeq INTEGER");
+}
+
+function migrateFollowStatus(db: Database.Database): void {
+  const cols = new Set(
+    (db.prepare("PRAGMA table_info(follow)").all() as { name: string }[]).map((c) => c.name)
+  );
+  if (!cols.has("status")) {
+    db.exec("ALTER TABLE follow ADD COLUMN status TEXT NOT NULL DEFAULT 'accepted'");
+  }
 }

@@ -21,6 +21,7 @@ import {
   buildLike,
   buildAnnounce,
   sendReject,
+  sendAccept,
   recordLocalContent,
   catchupSince,
 } from "../federation";
@@ -224,22 +225,38 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       return res.status(400).json({ error: "ator a seguir nao determinado" });
     }
 
+    const isLocal = followeeUri.startsWith(BASE_URL);
+    const status = isLocal ? "accepted" : "pending";
+
+    // Se já existe follow com status 'accepted', retorna 409.
+    // Se existe com status 'pending', retorna sucesso (já solicitado).
+    const existing = db.prepare(
+      "SELECT status FROM follow WHERE followerActorUri = ? AND followeeActorUri = ?"
+    ).get(followerUri, followeeUri) as { status: string } | undefined;
+
+    if (existing) {
+      if (existing.status === "accepted") {
+        return res.status(409).json({ error: "já segue esse ator" });
+      }
+      return res.json({ follower: followerUri, followee: followeeUri, status: "pending" });
+    }
+
     try {
       db.prepare(
-        `INSERT INTO follow (id, followerActorUri, followeeActorUri, createdAt)
-         VALUES (?, ?, ?, ?)`
-      ).run(ulid(), followerUri, followeeUri, new Date().toISOString());
+        `INSERT INTO follow (id, followerActorUri, followeeActorUri, status, createdAt)
+         VALUES (?, ?, ?, ?, ?)`
+      ).run(ulid(), followerUri, followeeUri, status, new Date().toISOString());
     } catch {
       return res.status(409).json({ error: "já segue esse ator" });
     }
 
     // Se o ator seguido mora em outro peer, avisa esse peer via Follow federado,
     // para que ele passe a nos entregar as postagens do ator (fan-out remoto).
-    if (!followeeUri.startsWith(BASE_URL)) {
+    if (!isLocal) {
       sendFollow(db, followerUri, followeeUri);
     }
 
-    res.status(201).json({ follower: followerUri, followee: followeeUri });
+    res.status(201).json({ follower: followerUri, followee: followeeUri, status });
   });
 
   // DELETE /users/:id/following — deixa de seguir. Aceita `actorUri` ou `handle`.
@@ -489,8 +506,8 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const uri = actorUri(BASE_URL, person.id);
     const rows = db
-      .prepare("SELECT followeeActorUri FROM follow WHERE followerActorUri = ?")
-      .all(uri) as { followeeActorUri: string }[];
+      .prepare("SELECT followeeActorUri, status FROM follow WHERE followerActorUri = ? AND status = 'accepted'")
+      .all(uri) as { followeeActorUri: string; status: string }[];
 
     res.json({
       "@context": "https://www.w3.org/ns/activitystreams",
@@ -509,15 +526,40 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const uri = actorUri(BASE_URL, person.id);
     const rows = db
-      .prepare("SELECT followerActorUri FROM follow WHERE followeeActorUri = ?")
-      .all(uri) as { followerActorUri: string }[];
+      .prepare("SELECT followerActorUri, status FROM follow WHERE followeeActorUri = ?")
+      .all(uri) as { followerActorUri: string; status: string }[];
 
     res.json({
       "@context": "https://www.w3.org/ns/activitystreams",
       type: "Collection",
       totalItems: rows.length,
-      items: rows.map((r) => r.followerActorUri),
+      items: rows.map((r) => ({ actorUri: r.followerActorUri, status: r.status })),
     });
+  });
+
+  // POST /users/:id/followers/:actorUri/accept — aceita uma solicitação de follow
+  router.post("/users/:id/followers/:actorUri/accept", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const followeeUri = actorUri(BASE_URL, person.id);
+    const followerUri = decodeURIComponent(req.params.actorUri);
+
+    const result = db
+      .prepare("UPDATE follow SET status = 'accepted' WHERE followerActorUri = ? AND followeeActorUri = ?")
+      .run(followerUri, followeeUri);
+
+    if (result.changes === 0) {
+      return res.status(404).json({ error: "Solicitação não encontrada" });
+    }
+
+    if (!followerUri.startsWith(BASE_URL)) {
+      sendAccept(db, followeeUri, followerUri);
+    }
+
+    res.json({ status: "accepted", follower: followerUri });
   });
 
   return router;

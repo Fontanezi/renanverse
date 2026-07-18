@@ -58,7 +58,8 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
         loading={loading}
         onDelete={handleDelete}
         isOwn={true}
-        emptyMessage="Você ainda não publicou nada."
+        actorNames={{ [user.id]: user.preferredUsername }}
+        emptyMessage="Nenhum post ainda."
       />
     </div>
   );

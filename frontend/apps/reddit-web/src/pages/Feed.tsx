@@ -148,6 +148,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
         onEdit={handleEditClick}
         onDelete={handleDelete}
         isOwn={true}
+        actorNames={{ [user.id]: user.preferredUsername }}
         emptyMessage="Nada no feed. Siga outros usuários para ver posts aqui!"
       />
     </div>

@@ -10,7 +10,7 @@ export function createUserApi(api: RawClient) {
       api.get<Person>(`/users/${id}`),
 
     follow: (userId: string, target: { actorUri?: string; handle?: string }) =>
-      api.post<{ status: string }>(`/users/${userId}/following`, target),
+      api.post<{ follower: string; followee: string; status: string }>(`/users/${userId}/following`, target),
 
     unfollow: (userId: string, target: { actorUri: string }) =>
       api.del<{ status: string }>(`/users/${userId}/following`, target),
@@ -22,6 +22,9 @@ export function createUserApi(api: RawClient) {
       api.get<{ items: string[] }>(`/users/${userId}/following`),
 
     getFollowers: (userId: string) =>
-      api.get<{ items: string[] }>(`/users/${userId}/followers`),
+      api.get<{ items: { actorUri: string; status: string }[] }>(`/users/${userId}/followers`),
+
+    acceptFollower: (userId: string, actorUri: string) =>
+      api.post<{ status: string }>(`/users/${userId}/followers/${encodeURIComponent(actorUri)}/accept`),
   };
 }
