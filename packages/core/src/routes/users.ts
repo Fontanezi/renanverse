@@ -58,6 +58,12 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
   const BASE_URL = config.baseUrl;
   const PUBLIC_KEY = publicKeyPem(db); // chave pública do peer, publicada no Person
 
+  function actorNameFromRow(row: ActivityRow): string | undefined {
+    if (!row.authorId) return undefined;
+    const person = db.prepare("SELECT preferredUsername FROM person WHERE id = ?").get(row.authorId) as { preferredUsername: string } | undefined;
+    return person?.preferredUsername;
+  }
+
   // POST /users — cria um novo Person neste peer
   router.post("/users", (req, res) => {
     const parsed = createPersonSchema.safeParse(req.body);
@@ -103,15 +109,28 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     const uri = actorUri(BASE_URL, person.id);
     const rows = db
       .prepare(
-        "SELECT * FROM activity WHERE actorUri = ? AND type NOT IN ('Update','Delete') ORDER BY published DESC"
+        "SELECT * FROM activity WHERE actorUri = ? AND type NOT IN ('Update','Delete','Like') ORDER BY published DESC"
       )
       .all(uri) as ActivityRow[];
+
+    const items = rows.map((r) => {
+      if (r.type === "Announce" && r.meta) {
+        try {
+          const meta = JSON.parse(r.meta) as { object?: string };
+          if (meta.object) {
+            const original = db.prepare("SELECT * FROM activity WHERE uri = ?").get(meta.object) as ActivityRow | undefined;
+            if (original) return activityToAS2(BASE_URL, r, original, actorNameFromRow(r));
+          }
+        } catch { /* ignore */ }
+      }
+      return activityToAS2(BASE_URL, r, undefined, actorNameFromRow(r));
+    });
 
     res.json({
       "@context": "https://www.w3.org/ns/activitystreams",
       type: "OrderedCollection",
       totalItems: rows.length,
-      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r)),
+      orderedItems: items,
     });
   });
 
@@ -159,7 +178,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     );
 
     const row = db.prepare("SELECT * FROM activity WHERE id = ?").get(id) as ActivityRow;
-    const as2 = activityToAS2(BASE_URL, row);
+    const as2 = activityToAS2(BASE_URL, row, undefined, person.preferredUsername);
 
     // Menções: resolve @usuario@host (WebFinger) e anexa como tag Mention no
     // objeto, para o fan-out também entregar aos atores mencionados (§3).
@@ -356,8 +375,8 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
 
     const actor = actorUri(BASE_URL, person.id);
     const row = db
-      .prepare("SELECT * FROM activity WHERE id = ? AND actorUri = ?")
-      .get(req.params.activityId, actor) as ActivityRow | undefined;
+      .prepare("SELECT * FROM activity WHERE (id = ? OR uri LIKE ?) AND actorUri = ?")
+      .get(req.params.activityId, `%/${req.params.activityId}`, actor) as ActivityRow | undefined;
     if (!row) return res.status(404).json({ error: "Activity não encontrada" });
 
     const targetUri = row.uri ?? `${BASE_URL}/activities/${row.id}`;
@@ -414,6 +433,107 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
   router.post("/users/:id/likes", contentAction("Like"));
   router.post("/users/:id/announces", contentAction("Announce"));
 
+  // DELETE /users/:id/likes — desfaz um Like (unlike). O body { object } é a URI
+  // do post curtido. Federa Undo{Like} e remove o Like local.
+  router.delete("/users/:id/likes", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const schema = z.object({ object: z.string() });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const actor = actorUri(BASE_URL, person.id);
+    const target = parsed.data.object;
+
+    const likes = db
+      .prepare("SELECT * FROM activity WHERE type = 'Like' AND actorUri = ?")
+      .all(actor) as ActivityRow[];
+
+    const match = likes.find((r) => {
+      if (!r.meta) return false;
+      try { return (JSON.parse(r.meta) as { object?: string }).object === target; } catch { return false; }
+    });
+
+    if (!match) return res.status(404).json({ error: "Like não encontrado" });
+
+    const targetUri = match.uri ?? `${BASE_URL}/activities/${match.id}`;
+    fanOutToFollowers(db, buildUndo(db, actor, { type: "Like", id: targetUri }));
+    db.prepare("DELETE FROM activity WHERE id = ?").run(match.id);
+
+    return res.json({ undone: targetUri });
+  });
+
+  // DELETE /users/:id/announces — desfaz um Announce (unboost). Body { object }
+  // é a URI do post compartilhado. Federa Undo{Announce} e remove.
+  router.delete("/users/:id/announces", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const schema = z.object({ object: z.string() });
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
+
+    const actor = actorUri(BASE_URL, person.id);
+    const target = parsed.data.object;
+
+    const announces = db
+      .prepare("SELECT * FROM activity WHERE type = 'Announce' AND actorUri = ?")
+      .all(actor) as ActivityRow[];
+
+    const match = announces.find((r) => {
+      if (!r.meta) return false;
+      try { return (JSON.parse(r.meta) as { object?: string }).object === target; } catch { return false; }
+    });
+
+    if (!match) return res.status(404).json({ error: "Announce não encontrado" });
+
+    const targetUri = match.uri ?? `${BASE_URL}/activities/${match.id}`;
+    fanOutToFollowers(db, buildUndo(db, actor, { type: "Announce", id: targetUri }));
+    db.prepare("DELETE FROM activity WHERE id = ?").run(match.id);
+
+    return res.json({ undone: targetUri });
+  });
+
+  // GET /users/:id/liked — retorna os posts originais que o usuário curtiu
+  router.get("/users/:id/liked", (req, res) => {
+    const person = db
+      .prepare("SELECT * FROM person WHERE id = ?")
+      .get(req.params.id) as PersonRow | undefined;
+    if (!person) return res.status(404).json({ error: "Person não encontrado" });
+
+    const uri = actorUri(BASE_URL, person.id);
+    const likes = db
+      .prepare("SELECT meta FROM activity WHERE type = 'Like' AND actorUri = ?")
+      .all(uri) as { meta: string | null }[];
+
+    const likedUris = likes
+      .map((l) => {
+        try { return l.meta ? (JSON.parse(l.meta) as { object?: string }).object : null; } catch { return null; }
+      })
+      .filter((u): u is string => !!u);
+
+    if (likedUris.length === 0) {
+      return res.json({ orderedItems: [] });
+    }
+
+    const placeholders = likedUris.map(() => "?").join(",");
+    const rows = db
+      .prepare(`SELECT * FROM activity WHERE uri IN (${placeholders})`)
+      .all(...likedUris) as ActivityRow[];
+
+    res.json({
+      "@context": "https://www.w3.org/ns/activitystreams",
+      type: "OrderedCollection",
+      totalItems: rows.length,
+      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r, undefined, actorNameFromRow(r))),
+    });
+  });
+
   // DELETE /users/:id/followers — remove um seguidor (rejeita o Follow). Federa
   // um Reject para a inbox do seguidor, que então desfaz o follow do lado dele.
   router.delete("/users/:id/followers", (req, res) => {
@@ -461,16 +581,29 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       .prepare(
         `SELECT * FROM activity
            WHERE actorUri IN (SELECT followeeActorUri FROM follow WHERE followerActorUri = ?)
-             AND type NOT IN ('Update','Delete')
+             AND type NOT IN ('Update','Delete','Like')
            ORDER BY lamportClock ASC, published ASC`
       )
       .all(uri) as ActivityRow[];
+
+    const items = rows.map((r) => {
+      if (r.type === "Announce" && r.meta) {
+        try {
+          const meta = JSON.parse(r.meta) as { object?: string };
+          if (meta.object) {
+            const original = db.prepare("SELECT * FROM activity WHERE uri = ?").get(meta.object) as ActivityRow | undefined;
+            if (original) return activityToAS2(BASE_URL, r, original, actorNameFromRow(r));
+          }
+        } catch { /* ignore */ }
+      }
+      return activityToAS2(BASE_URL, r, undefined, actorNameFromRow(r));
+    });
 
     res.json({
       "@context": "https://www.w3.org/ns/activitystreams",
       type: "OrderedCollection",
       totalItems: rows.length,
-      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r)),
+      orderedItems: items,
     });
   });
 
@@ -493,7 +626,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       "@context": "https://www.w3.org/ns/activitystreams",
       type: "OrderedCollection",
       totalItems: rows.length,
-      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r)),
+      orderedItems: rows.map((r) => activityToAS2(BASE_URL, r, undefined, actorNameFromRow(r))),
     });
   });
 

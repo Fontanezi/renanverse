@@ -20,7 +20,7 @@ export function useFeed(client: RawClient, userId: string | null) {
       const seen = new Set<string>();
       const merged: Activity[] = [];
       for (const a of [...selfPosts, ...feed]) {
-        if (a.id && !seen.has(a.id)) {
+        if (a.id && !seen.has(a.id) && (a.type === "Create" || a.type === "Announce")) {
           seen.add(a.id);
           merged.push(a);
         }

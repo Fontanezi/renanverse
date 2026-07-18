@@ -1,6 +1,6 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Feed, useFeed, useSocket } from "@renanverse-frontend/shared";
-import type { Person, Activity, ApiClient } from "@renanverse-frontend/shared";
+import type { Person, Activity, ApiClient, FeedResponse } from "@renanverse-frontend/shared";
 import { TweetComposer } from "../components/TweetComposer";
 
 interface FeedPageProps {
@@ -17,6 +17,13 @@ export function FeedPage({ api, user }: FeedPageProps) {
   const editingRef = useRef<Activity | null>(null);
 
   const { items, loading, prepend, removeByUri } = useFeed(api.client, userId);
+  const [likedUris, setLikedUris] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    api.activities.liked(userId).then((res: FeedResponse) => {
+      setLikedUris(new Set((res.orderedItems ?? []).map((a) => a.id!).filter(Boolean)));
+    }).catch(() => {});
+  }, [userId]);
 
   const handleNewActivity = useCallback((activity: Activity) => {
     prepend(activity);
@@ -75,6 +82,12 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
   const handleLike = async (uri: string) => {
     await api.activities.like(userId, uri);
+    setLikedUris((prev) => { const next = new Set(prev); next.add(uri); return next; });
+  };
+
+  const handleUnlike = async (uri: string) => {
+    await api.activities.unlike(userId, uri);
+    setLikedUris((prev) => { const next = new Set(prev); next.delete(uri); return next; });
   };
 
   const handleShare = async (uri: string) => {
@@ -82,6 +95,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
   };
 
   const handleReply = (activity: Activity) => {
+    const handle = activity.actorName ?? activity.actor?.split("//")[1] ?? activity.actor;
     setReplyTo(activity);
     setEditing(null);
     setComposerOpen(true);
@@ -127,7 +141,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
           <div style={{ marginTop: 12 }}>
             {replyTo && (
               <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
-                Respondendo a @{replyTo.actor?.split("/users/")[1]}
+                Respondendo a @{replyTo.actorName ?? replyTo.actor?.split("//")[1] ?? replyTo.actor}
               </p>
             )}
             {editing ? (
@@ -143,6 +157,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
                 onSubmit={(c) => handlePost(c, replyTo?.id)}
                 maxChars={280}
                 placeholder="Digite seu tweet..."
+                initialContent={replyTo ? `@${replyTo.actorName ?? replyTo.actor?.split("//")[1] ?? replyTo.actor} ` : undefined}
               />
             )}
           </div>
@@ -153,11 +168,13 @@ export function FeedPage({ api, user }: FeedPageProps) {
         items={items}
         loading={loading}
         onLike={handleLike}
+        onUnlike={handleUnlike}
         onShare={handleShare}
         onReply={handleReply}
         onEdit={handleEditClick}
         onDelete={handleDelete}
-        isOwn={true}
+        userUri={user.id}
+        likedUris={likedUris}
         actorNames={{ [user.id]: user.preferredUsername }}
         emptyMessage="Nenhum post no feed. Siga outros usuários para ver o que estão publicando!"
       />

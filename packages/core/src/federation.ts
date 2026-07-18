@@ -686,7 +686,7 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
  */
 export function recordLocalContent(db: Database, wire: Wire, meta: string | null = null): string {
   const { activity, _meta } = wire;
-  const id = ulid();
+  const id = (typeof activity.id === "string" ? activity.id.split("/").pop() : null) ?? ulid();
   db.prepare(
     `INSERT OR IGNORE INTO activity
        (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, origin, originSeq, published, raw, authorId)

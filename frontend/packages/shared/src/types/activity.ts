@@ -16,9 +16,11 @@ export interface Activity {
   type: "Create" | "Update" | "Delete" | "Follow" | "Like" | "Announce" | "Undo";
   id?: string;
   actor: string;
+  actorName?: string;
   object: ActivityObject;
   published?: string;
   to?: string[];
+  repostOf?: string;
 }
 
 export interface ActivityInput {

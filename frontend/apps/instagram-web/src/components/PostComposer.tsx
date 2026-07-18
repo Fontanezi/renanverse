@@ -1,11 +1,12 @@
 import { useState } from "react";
 
 interface PostComposerProps {
-  onSubmit: (attachmentUrl: string, caption?: string) => void;
+  onSubmit: (attachmentUrl: string, caption?: string, inReplyTo?: string) => void;
   initialUrl?: string;
   initialCaption?: string;
   editingId?: string;
   disabled?: boolean;
+  replyToHandle?: string;
 }
 
 export function PostComposer({ onSubmit, initialUrl, initialCaption, editingId, disabled }: PostComposerProps) {

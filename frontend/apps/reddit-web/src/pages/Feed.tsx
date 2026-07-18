@@ -1,6 +1,6 @@
-import { useState, useCallback, useRef } from "react";
+import { useState, useCallback, useRef, useEffect } from "react";
 import { Feed, useFeed, useSocket } from "@renanverse-frontend/shared";
-import type { Person, Activity, ApiClient } from "@renanverse-frontend/shared";
+import type { Person, Activity, ApiClient, FeedResponse } from "@renanverse-frontend/shared";
 import { PostComposer } from "../components/PostComposer";
 
 interface FeedPageProps {
@@ -11,11 +11,19 @@ interface FeedPageProps {
 export function FeedPage({ api, user }: FeedPageProps) {
   const userId = user.id.split("/users/")[1];
   const [composerOpen, setComposerOpen] = useState(false);
+  const [replyTo, setReplyTo] = useState<Activity | null>(null);
   const [editing, setEditing] = useState<Activity | null>(null);
   const [saving, setSaving] = useState(false);
   const editingRef = useRef<Activity | null>(null);
 
   const { items, loading, prepend, removeByUri } = useFeed(api.client, userId);
+  const [likedUris, setLikedUris] = useState<Set<string>>(new Set());
+
+  useEffect(() => {
+    api.activities.liked(userId).then((res: FeedResponse) => {
+      setLikedUris(new Set((res.orderedItems ?? []).map((a) => a.id!).filter(Boolean)));
+    }).catch(() => {});
+  }, [userId]);
 
   const handleNewActivity = useCallback((activity: Activity) => {
     prepend(activity);
@@ -38,6 +46,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
     content?: string;
     attachmentUrl?: string;
     objectType: "Link" | "Page";
+    inReplyTo?: string;
   }) => {
     try {
       const activity = await api.activities.create(userId, {
@@ -46,9 +55,11 @@ export function FeedPage({ api, user }: FeedPageProps) {
         title: input.title,
         content: input.content,
         attachmentUrl: input.attachmentUrl,
+        inReplyTo: input.inReplyTo,
       });
       prepend(activity);
       setComposerOpen(false);
+      setReplyTo(null);
     } catch (e) {
       alert("Erro ao publicar: " + (e instanceof Error ? e.message : String(e)));
     }
@@ -82,15 +93,28 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
   const handleLike = async (uri: string) => {
     await api.activities.like(userId, uri);
+    setLikedUris((prev) => { const next = new Set(prev); next.add(uri); return next; });
+  };
+
+  const handleUnlike = async (uri: string) => {
+    await api.activities.unlike(userId, uri);
+    setLikedUris((prev) => { const next = new Set(prev); next.delete(uri); return next; });
   };
 
   const handleShare = async (uri: string) => {
     await api.activities.announce(userId, uri);
   };
 
+  const handleReply = (activity: Activity) => {
+    setReplyTo(activity);
+    setEditing(null);
+    setComposerOpen(true);
+  };
+
   const handleEditClick = (activity: Activity) => {
     setEditing(activity);
     editingRef.current = activity;
+    setReplyTo(null);
     setComposerOpen(true);
   };
 
@@ -107,7 +131,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
     <div>
       <div style={{ padding: "16px 24px", borderBottom: "1px solid #eee" }}>
         <button
-          onClick={() => { setEditing(null); setComposerOpen(!composerOpen); }}
+          onClick={() => { setReplyTo(null); setEditing(null); setComposerOpen(!composerOpen); }}
           style={{
             width: "100%",
             padding: "12px 20px",
@@ -124,6 +148,11 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
         {composerOpen && (
           <div style={{ marginTop: 12 }}>
+            {replyTo && (
+              <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
+                Respondendo a @{replyTo.actorName ?? replyTo.actor?.split("/")[1] ?? replyTo.actor}
+              </p>
+            )}
             {editing ? (
               <PostComposer
                 onSubmit={handleEdit}
@@ -134,7 +163,9 @@ export function FeedPage({ api, user }: FeedPageProps) {
                 disabled={saving}
               />
             ) : (
-              <PostComposer onSubmit={handlePost} />
+              <PostComposer
+                onSubmit={(input) => handlePost({ ...input, inReplyTo: replyTo?.id })}
+              />
             )}
           </div>
         )}
@@ -144,10 +175,13 @@ export function FeedPage({ api, user }: FeedPageProps) {
         items={items}
         loading={loading}
         onLike={handleLike}
+        onUnlike={handleUnlike}
         onShare={handleShare}
+        onReply={handleReply}
         onEdit={handleEditClick}
         onDelete={handleDelete}
-        isOwn={true}
+        userUri={user.id}
+        likedUris={likedUris}
         actorNames={{ [user.id]: user.preferredUsername }}
         emptyMessage="Nada no feed. Siga outros usuários para ver posts aqui!"
       />

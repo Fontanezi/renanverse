@@ -11,6 +11,8 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
   const userId = user.id.split("/users/")[1];
   const [posts, setPosts] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [liked, setLiked] = useState<any[]>([]);
+  const [loadingLiked, setLoadingLiked] = useState(true);
 
   useEffect(() => {
     api.activities.list(userId).then((res: FeedResponse) => {
@@ -18,6 +20,15 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
       setLoading(false);
     }).catch(() => setLoading(false));
   }, []);
+
+  useEffect(() => {
+    api.activities.liked(userId).then((res: FeedResponse) => {
+      setLiked(res.orderedItems ?? []);
+      setLoadingLiked(false);
+    }).catch(() => setLoadingLiked(false));
+  }, []);
+
+  const likedUris = new Set(liked.map((a: any) => a.id!).filter(Boolean));
 
   const handleDelete = async (uri: string) => {
     try {
@@ -27,6 +38,17 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
       alert("Erro ao excluir: " + (e instanceof Error ? e.message : String(e)));
     }
   };
+
+  const handleUnlike = async (uri: string) => {
+    try {
+      await api.activities.unlike(userId, uri);
+      setLiked((prev) => prev.filter((a: any) => a.id !== uri));
+    } catch (e) {
+      alert("Erro ao remover like: " + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const actorNames = { [user.id]: user.preferredUsername };
 
   return (
     <div>
@@ -61,9 +83,23 @@ export function ProfilePage({ api, user }: ProfilePageProps) {
         items={posts}
         loading={loading}
         onDelete={handleDelete}
-        isOwn={true}
-        actorNames={{ [user.id]: user.preferredUsername }}
+        userUri={user.id}
+        likedUris={likedUris}
+        actorNames={actorNames}
         emptyMessage="Você ainda não publicou nada."
+      />
+
+      <h3 style={{ padding: "12px 24px", margin: 0, borderBottom: "1px solid #eee", fontSize: "1rem", borderTop: "8px solid #f0f0f0" }}>
+        Posts curtidos
+      </h3>
+      <Feed
+        items={liked}
+        loading={loadingLiked}
+        userUri={user.id}
+        onUnlike={handleUnlike}
+        likedUris={likedUris}
+        actorNames={actorNames}
+        emptyMessage="Nenhum post curtido ainda."
       />
     </div>
   );

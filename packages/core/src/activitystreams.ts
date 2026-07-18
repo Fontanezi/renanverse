@@ -68,7 +68,7 @@ export function personToAS2(baseUrl: string, p: PersonRow, publicKeyPem?: string
 }
 
 /** Serializa uma Activity do banco para o objeto AS2 correspondente. */
-export function activityToAS2(baseUrl: string, a: ActivityRow) {
+export function activityToAS2(baseUrl: string, a: ActivityRow, repost?: ActivityRow, actorName?: string) {
   let meta: Record<string, unknown> | undefined;
   if (a.meta) {
     try {
@@ -78,13 +78,37 @@ export function activityToAS2(baseUrl: string, a: ActivityRow) {
     }
   }
 
-  return {
+  const base = {
     "@context": ["https://www.w3.org/ns/activitystreams"],
-    // Activities remotas preservam a URI da origem; locais derivam do baseUrl.
     id: a.uri ?? `${baseUrl}/activities/${a.id}`,
     type: a.type,
     actor: a.actorUri,
+    actorName,
     published: a.published,
+  };
+
+  if (a.type === "Announce" && repost) {
+    let repostMeta: Record<string, unknown> | undefined;
+    if (repost.meta) {
+      try { repostMeta = JSON.parse(repost.meta); } catch { repostMeta = undefined; }
+    }
+
+    return {
+      ...base,
+      object: {
+        type: repost.objectType ?? "Note",
+        content: repost.content ?? undefined,
+        attachment: repost.attachmentUrl ?? undefined,
+        inReplyTo: repost.inReplyTo ?? undefined,
+        ...repostMeta,
+      },
+      repostOf: repost.actorUri,
+      _lamportClock: a.lamportClock,
+    };
+  }
+
+  return {
+    ...base,
     object: {
       type: a.objectType ?? "Note",
       content: a.content ?? undefined,

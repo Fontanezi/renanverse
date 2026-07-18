@@ -37,6 +37,9 @@ export function createActivityApi(api: RawClient) {
         object: objectUri,
       }),
 
+    liked: (userId: string) =>
+      api.get<FeedResponse>(`/users/${userId}/liked`),
+
     mentions: (userId: string) =>
       api.get<FeedResponse>(`/users/${userId}/mentions`),
   };
