@@ -45,7 +45,7 @@ function PostBody({ obj, attachmentUrl, compact }: { obj: Activity["object"]; at
   return (
     <div style={{ fontSize, lineHeight: 1.5 }}>
       {obj?.content && <p style={{ margin: "4px 0" }}>{renderContent(obj.content)}</p>}
-      {obj?.title && <h3 style={{ margin: "4px 0", fontSize }}>{obj.title}</h3>}
+      {!obj?.content && obj?.title && <h3 style={{ margin: "4px 0", fontSize }}>{obj.title}</h3>}
       {attachmentUrl && (
         <div style={{ margin: "8px 0" }}>
           {obj.type === "Image" ? (

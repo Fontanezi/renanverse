@@ -11,7 +11,6 @@ interface FeedPageProps {
 export function FeedPage({ api, user }: FeedPageProps) {
   const userId = user.id.split("/users/")[1];
   const [composerOpen, setComposerOpen] = useState(false);
-  const [replyTo, setReplyTo] = useState<Activity | null>(null);
   const [editing, setEditing] = useState<Activity | null>(null);
   const [saving, setSaving] = useState(false);
   const editingRef = useRef<Activity | null>(null);
@@ -26,6 +25,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
   }, [userId]);
 
   const handleNewActivity = useCallback((activity: Activity) => {
+    if (activity.type !== "Create" && activity.type !== "Announce") return;
     prepend(activity);
   }, [prepend]);
 
@@ -41,20 +41,32 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
   useSocket("", userId, handleNewActivity, handleUpdateActivity, handleDeleteActivity);
 
-  const handlePost = async (attachmentUrl: string, caption?: string, inReplyTo?: string) => {
+  const handlePost = async (attachmentUrl: string, caption?: string) => {
     try {
       const activity = await api.activities.create(userId, {
         type: "Create",
         objectType: "Image",
         content: caption,
         attachmentUrl,
-        inReplyTo,
       });
       prepend(activity);
       setComposerOpen(false);
-      setReplyTo(null);
     } catch (e) {
       alert("Erro ao publicar: " + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const handleReplySubmit = async (text: string, parentId: string) => {
+    try {
+      const activity = await api.activities.create(userId, {
+        type: "Create",
+        objectType: "Note",
+        content: text,
+        inReplyTo: parentId,
+      });
+      prepend(activity);
+    } catch (e) {
+      alert("Erro ao responder: " + (e instanceof Error ? e.message : String(e)));
     }
   };
 
@@ -92,16 +104,9 @@ export function FeedPage({ api, user }: FeedPageProps) {
     await api.activities.announce(userId, uri);
   };
 
-  const handleReply = (activity: Activity) => {
-    setReplyTo(activity);
-    setEditing(null);
-    setComposerOpen(true);
-  };
-
   const handleEditClick = (activity: Activity) => {
     setEditing(activity);
     editingRef.current = activity;
-    setReplyTo(null);
     setComposerOpen(true);
   };
 
@@ -114,13 +119,11 @@ export function FeedPage({ api, user }: FeedPageProps) {
     }
   };
 
-  const replyHandle = replyTo ? replyTo.actorName ?? replyTo.actor?.split("//")[1] ?? replyTo.actor : undefined;
-
   return (
     <div>
       <div style={{ padding: "16px 24px", borderBottom: "1px solid #eee" }}>
         <button
-          onClick={() => { setReplyTo(null); setEditing(null); setComposerOpen(!composerOpen); }}
+          onClick={() => { setEditing(null); setComposerOpen(!composerOpen); }}
           style={{
             width: "100%",
             padding: "12px 20px",
@@ -137,11 +140,6 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
         {composerOpen && (
           <div style={{ marginTop: 12 }}>
-            {replyTo && (
-              <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
-                Respondendo a @{replyTo.actorName ?? replyTo.actor?.split("/")[1] ?? replyTo.actor}
-              </p>
-            )}
             {editing ? (
               <PostComposer
                 onSubmit={(url, caption) => handleEdit(url, caption)}
@@ -152,8 +150,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
               />
             ) : (
               <PostComposer
-                onSubmit={(url, caption) => handlePost(url, caption, replyTo?.id)}
-                replyToHandle={replyHandle}
+                onSubmit={(url, caption) => handlePost(url, caption)}
               />
             )}
           </div>
@@ -166,7 +163,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
         onLike={handleLike}
         onUnlike={handleUnlike}
         onShare={handleShare}
-        onReply={handleReply}
+        onReplySubmit={handleReplySubmit}
         onEdit={handleEditClick}
         onDelete={handleDelete}
         userUri={user.id}

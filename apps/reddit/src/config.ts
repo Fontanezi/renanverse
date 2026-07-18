@@ -16,10 +16,11 @@ const BASE_URL = process.env.BASE_URL ?? "http://localhost:3003";
 export const redditActivitySchema = z.object({
   type: z.enum(["Create", "Like", "Announce"]).default("Create"),
   objectType: z.enum(["Link", "Page"]).default("Page"),
-  title: z.string().min(1, "Todo post precisa de título").max(300, "Título muito longo (máx. 300)"),
+  title: z.string().max(300, "Título muito longo (máx. 300)").optional(),
   content: z.string().optional(),
   attachmentUrl: z.string().url("attachmentUrl deve ser uma URL válida").optional(),
   community: z.string().min(1).default("geral"),
+  inReplyTo: z.string().optional(),
 })
   .superRefine((val, ctx) => {
     if (val.objectType === "Link" && !val.attachmentUrl) {
@@ -30,9 +31,10 @@ export const redditActivitySchema = z.object({
       });
     }
   })
-  .transform(({ title, community, ...rest }) => ({
+  .transform(({ title, community, inReplyTo, content, ...rest }) => ({
     ...rest,
-    meta: { title, community },
+    content,
+    meta: { title: title ?? (content ? content.slice(0, 300) : "Resposta"), community, ...(inReplyTo ? { inReplyTo } : {}) },
   }));
 
 export const redditConfig: PlatformConfig = {
@@ -60,7 +62,20 @@ export const redditConfig: PlatformConfig = {
         type: "OrderedCollection",
         name: req.params.name,
         totalItems: rows.length,
-        orderedItems: rows.map((r) => activityToAS2(BASE_URL, r)),
+        orderedItems: rows.map((r) => {
+          let actorName: string | undefined;
+          if (r.authorId) {
+            const p = db.prepare("SELECT preferredUsername FROM person WHERE id = ?").get(r.authorId) as { preferredUsername: string } | undefined;
+            actorName = p?.preferredUsername;
+          }
+          if (!actorName) {
+            try {
+              const wire = JSON.parse(r.raw) as { activity?: { actorName?: string } };
+              if (wire?.activity?.actorName) actorName = wire.activity.actorName;
+            } catch {}
+          }
+          return activityToAS2(BASE_URL, r, undefined, actorName);
+        }),
       });
     });
   },

@@ -347,7 +347,8 @@ export function buildUpdate(
   targetUri: string,
   objectType: string,
   content: string | null,
-  attachmentUrl: string | null
+  attachmentUrl: string | null,
+  meta?: Record<string, unknown>
 ): Wire {
   const activity = {
     "@context": ["https://www.w3.org/ns/activitystreams"],
@@ -359,6 +360,7 @@ export function buildUpdate(
       id: targetUri,
       content: content ?? undefined,
       attachment: attachmentUrl ?? undefined,
+      ...meta,
     },
   };
   return wrapContent(db, activity);

@@ -11,7 +11,6 @@ interface FeedPageProps {
 export function FeedPage({ api, user }: FeedPageProps) {
   const userId = user.id.split("/users/")[1];
   const [composerOpen, setComposerOpen] = useState(false);
-  const [replyTo, setReplyTo] = useState<Activity | null>(null);
   const [editing, setEditing] = useState<Activity | null>(null);
   const [saving, setSaving] = useState(false);
   const editingRef = useRef<Activity | null>(null);
@@ -26,6 +25,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
   }, [userId]);
 
   const handleNewActivity = useCallback((activity: Activity) => {
+    if (activity.type !== "Create" && activity.type !== "Announce") return;
     prepend(activity);
   }, [prepend]);
 
@@ -41,43 +41,56 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
   useSocket("", userId, handleNewActivity, handleUpdateActivity, handleDeleteActivity);
 
-  const handlePost = async (input: {
+  const createActivity = async (input: {
     title: string;
-    content?: string;
     attachmentUrl?: string;
-    objectType: "Link" | "Page";
+    content?: string;
     inReplyTo?: string;
   }) => {
+    const objectType = input.inReplyTo ? "Page" : "Link";
+    return api.activities.create(userId, {
+      type: "Create",
+      objectType,
+      title: input.title,
+      content: input.content,
+      attachmentUrl: input.inReplyTo ? undefined : input.attachmentUrl,
+      inReplyTo: input.inReplyTo,
+    });
+  };
+
+  const handlePost = async (input: { title: string; attachmentUrl: string }) => {
     try {
-      const activity = await api.activities.create(userId, {
-        type: "Create",
-        objectType: input.objectType,
+      const activity = await createActivity({
         title: input.title,
-        content: input.content,
         attachmentUrl: input.attachmentUrl,
-        inReplyTo: input.inReplyTo,
       });
       prepend(activity);
       setComposerOpen(false);
-      setReplyTo(null);
     } catch (e) {
       alert("Erro ao publicar: " + (e instanceof Error ? e.message : String(e)));
     }
   };
 
-  const handleEdit = async (input: {
-    title: string;
-    content?: string;
-    attachmentUrl?: string;
-    objectType: "Link" | "Page";
-  }) => {
+  const handleReplySubmit = async (text: string, parentId: string) => {
+    try {
+      const activity = await createActivity({
+        title: text.slice(0, 300),
+        content: text,
+        inReplyTo: parentId,
+      });
+      prepend(activity);
+    } catch (e) {
+      alert("Erro ao responder: " + (e instanceof Error ? e.message : String(e)));
+    }
+  };
+
+  const handleEdit = async (input: { title: string; attachmentUrl: string }) => {
     if (!editing?.id) return;
     setSaving(true);
     try {
       const id = editing.id.split("/").pop()!;
       const updated = await api.activities.update(userId, id, {
         title: input.title,
-        content: input.content,
         attachmentUrl: input.attachmentUrl,
       });
       removeByUri(editing.id);
@@ -105,16 +118,9 @@ export function FeedPage({ api, user }: FeedPageProps) {
     await api.activities.announce(userId, uri);
   };
 
-  const handleReply = (activity: Activity) => {
-    setReplyTo(activity);
-    setEditing(null);
-    setComposerOpen(true);
-  };
-
   const handleEditClick = (activity: Activity) => {
     setEditing(activity);
     editingRef.current = activity;
-    setReplyTo(null);
     setComposerOpen(true);
   };
 
@@ -131,7 +137,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
     <div>
       <div style={{ padding: "16px 24px", borderBottom: "1px solid #eee" }}>
         <button
-          onClick={() => { setReplyTo(null); setEditing(null); setComposerOpen(!composerOpen); }}
+          onClick={() => { setEditing(null); setComposerOpen(!composerOpen); }}
           style={{
             width: "100%",
             padding: "12px 20px",
@@ -148,23 +154,17 @@ export function FeedPage({ api, user }: FeedPageProps) {
 
         {composerOpen && (
           <div style={{ marginTop: 12 }}>
-            {replyTo && (
-              <p style={{ fontSize: "0.8125rem", color: "#888", marginBottom: 8 }}>
-                Respondendo a @{replyTo.actorName ?? replyTo.actor?.split("/")[1] ?? replyTo.actor}
-              </p>
-            )}
             {editing ? (
               <PostComposer
                 onSubmit={handleEdit}
                 initialTitle={editing.object?.title}
-                initialContent={editing.object?.content}
                 initialUrl={editing.object?.attachment ?? editing.object?.attachmentUrl}
                 editingId={editing.id}
                 disabled={saving}
               />
             ) : (
               <PostComposer
-                onSubmit={(input) => handlePost({ ...input, inReplyTo: replyTo?.id })}
+                onSubmit={handlePost}
               />
             )}
           </div>
@@ -177,7 +177,7 @@ export function FeedPage({ api, user }: FeedPageProps) {
         onLike={handleLike}
         onUnlike={handleUnlike}
         onShare={handleShare}
-        onReply={handleReply}
+        onReplySubmit={handleReplySubmit}
         onEdit={handleEditClick}
         onDelete={handleDelete}
         userUri={user.id}

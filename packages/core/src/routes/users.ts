@@ -59,9 +59,16 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
   const PUBLIC_KEY = publicKeyPem(db); // chave pública do peer, publicada no Person
 
   function actorNameFromRow(row: ActivityRow): string | undefined {
-    if (!row.authorId) return undefined;
-    const person = db.prepare("SELECT preferredUsername FROM person WHERE id = ?").get(row.authorId) as { preferredUsername: string } | undefined;
-    return person?.preferredUsername;
+    if (row.authorId) {
+      const person = db.prepare("SELECT preferredUsername FROM person WHERE id = ?").get(row.authorId) as { preferredUsername: string } | undefined;
+      if (person) return person.preferredUsername;
+    }
+    // Fallback: extract actorName from the wire JSON (catches remote activities)
+    try {
+      const wire = JSON.parse(row.raw) as { activity?: { actorName?: string } };
+      if (wire?.activity?.actorName) return wire.activity.actorName;
+    } catch { /* raw may not be valid JSON */ }
+    return undefined;
   }
 
   // POST /users — cria um novo Person neste peer
@@ -340,9 +347,9 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     }
 
     const schema = z
-      .object({ content: z.string().optional(), attachmentUrl: z.string().url().optional() })
-      .refine((d) => d.content !== undefined || d.attachmentUrl !== undefined, {
-        message: "informe 'content' e/ou 'attachmentUrl'",
+      .object({ content: z.string().optional(), attachmentUrl: z.string().url().optional(), title: z.string().max(300).optional() })
+      .refine((d) => d.content !== undefined || d.attachmentUrl !== undefined || d.title !== undefined, {
+        message: "informe 'content' e/ou 'attachmentUrl' e/ou 'title'",
       });
     const parsed = schema.safeParse(req.body);
     if (!parsed.success) return res.status(400).json({ error: parsed.error.flatten() });
@@ -350,14 +357,25 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     const targetUri = row.uri ?? `${BASE_URL}/activities/${row.id}`;
     const newContent = parsed.data.content ?? row.content;
     const newAttachment = parsed.data.attachmentUrl ?? row.attachmentUrl;
+    const newTitle = parsed.data.title;
+
+    // Atualiza meta com o novo título (se informado).
+    let newMeta = row.meta;
+    if (newTitle !== undefined && row.meta) {
+      try {
+        const parsedMeta = JSON.parse(row.meta) as Record<string, unknown>;
+        parsedMeta.title = newTitle;
+        newMeta = JSON.stringify(parsedMeta);
+      } catch { /* keep old meta */ }
+    }
 
     // Atualiza o post local.
     db.prepare(
-      "UPDATE activity SET content = ?, attachmentUrl = ?, lamportClock = ? WHERE id = ?"
-    ).run(newContent, newAttachment, nextLamport(db), row.id);
+      "UPDATE activity SET content = ?, attachmentUrl = ?, meta = ?, lamportClock = ? WHERE id = ?"
+    ).run(newContent, newAttachment, newMeta, nextLamport(db), row.id);
 
     // Federa o Update (e registra para catch-up).
-    const wire = buildUpdate(db, actor, targetUri, row.objectType ?? "Note", newContent, newAttachment);
+    const wire = buildUpdate(db, actor, targetUri, row.objectType ?? "Note", newContent, newAttachment, newTitle !== undefined ? { title: newTitle } : undefined);
     recordLocalContent(db, wire);
     fanOutToFollowers(db, wire);
 
