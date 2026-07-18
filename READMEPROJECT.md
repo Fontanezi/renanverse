@@ -356,3 +356,95 @@ corpo adulterado recebem 401.
 - Renderização AS2 mais fiel de `Like`/`Announce` (hoje a URI do objeto alvo
   fica em `object.object`; o alvo é preservado, mas a forma canônica seria
   `object` como string).
+
+
+
+## Frontend (SPAs)
+
+Cada plataforma possui o seu próprio frontend desenvolvido em **React** + **Vite** + **TypeScript**, compartilhando componentes e lógica de negócios através de uma estrutura de monorepo.
+
+### Pré-requisitos
+
+Antes de iniciar qualquer uma das aplicações, certifique-se de instalar as dependências a partir da raiz do diretório `frontend`:
+
+```bash
+cd frontend
+npm install
+```
+
+### Executando os SPAs
+
+> **Importante:** Certifique-se de iniciar os servidores backend correspondentes antes de executar o frontend, para que os proxies funcionem corretamente.
+
+Cada aplicação é executada em uma porta diferente através do servidor de desenvolvimento do Vite. Todas possuem configurações de proxy pré-definidas para apontar para o seu respectivo backend:
+
+```bash
+# Twitter   → http://localhost:5173 (proxy → :3001)
+npm run dev:twitter
+
+# Instagram → http://localhost:5174 (proxy → :3002)
+npm run dev:instagram
+
+# Reddit    → http://localhost:5175 (proxy → :3003)
+npm run dev:reddit
+```
+
+---
+
+### Estrutura de Diretórios
+
+O projeto utiliza um padrão de pacotes compartilhados para reaproveitamento de código e separação clara de responsabilidades:
+
+```text
+frontend/
+├── packages/shared/        # Código compartilhado entre os SPAs
+│   ├── src/api/            # Cliente HTTP + métodos unificados (create, like, follow, etc.)
+│   ├── src/components/     # UI Components (ActivityCard, Feed com árvore de replies, FollowForm, etc.)
+│   ├── src/hooks/          # Custom hooks (useFeed com polling + merge, useSocket para tempo real)
+│   └── src/types/          # Definições de tipos TypeScript (Activity, ActivityInput, FeedResponse, etc.)
+│
+├── apps/twitter-web/       # SPA dedicado ao Twitter
+├── apps/instagram-web/     # SPA dedicado ao Instagram
+└── apps/reddit-web/        # SPA dedicado ao Reddit
+```
+
+---
+
+### Funcionalidades Implementadas
+
+#### Postagens (Formatos Específicos)
+Cada plataforma gerencia e valida seu formato nativo de publicação:
+*   **Twitter:** Texto curto (`Note`)
+*   **Instagram:** Imagem (`Image`)
+*   **Reddit:** Link (`Link`)
+
+#### Respostas em Árvore (Threads)
+*   Qualquer publicação no feed pode ser respondida utilizando o botão `Reply`.
+*   A ação abre um campo de texto (`textarea`) inline logo abaixo do post, preenchendo automaticamente a menção ao autor (`@apelido`).
+*   As respostas são exibidas de forma aninhada no feed (utilizando indentação e uma borda lateral visual de linha do tempo).
+*   No **Reddit** e **Instagram**, as respostas são sempre tratadas como texto puro (`Note`), mantendo a integridade do formato original do post pai (`Link` ou `Image`).
+
+#### Seguir Usuários (Federação)
+*   A busca e o follow são realizados informando o handle do usuário no formato federado: `usuario@host:porta`.
+*   **Follows:** Solicitações entre plataformas diferentes ficam com o status `pending` até que o usuário alvo tome uma ação.
+*   Na aba `/explore`, o usuário pode **Aceitar** ou **Recusar** novos seguidores pendentes.
+
+#### Feed Dinâmico
+*   O feed exibe uma linha do tempo unificada mesclando as postagens de todos os usuários seguidos e as publicações do próprio usuário.
+*   **Tempo Real:** Sincronização instantânea de novos posts, edições e exclusões via **Socket.IO**.
+*   **Fallback:** Mecanismo de *polling* automático a cada 30 segundos garante a atualização caso a conexão socket falhe.
+*   **Feed Filtrado:** Exibe estritamente atividades do tipo `Create` e `Announce` (reposts), evitando que interações como `Like`, `Update` e `Delete` poluam visualmente a timeline.
+
+#### Curtidas (Like / Unlike)
+*   Botão interativo presente em todos os cards de postagem para curtir ou descurtir.
+*   **Unlike Federado:** Envia uma atividade de `Undo{Like}` para propagar o descurtir para os servidores e seguidores remotos.
+*   Visualização dedicada de histórico através da aba **"Posts curtidos"** no perfil do usuário.
+
+#### Repost (Announce / Unrepost)
+*   Botão `Share` que permite compartilhar uma publicação de terceiros no seu próprio feed.
+*   O repost é renderizado na timeline com o indicador `@user repostou`, trazendo o card do post original aninhado logo abaixo.
+*   Suporte completo para desfazer o compartilhamento a qualquer momento.
+
+#### Editar e Excluir
+*   **Edição:** Posts do próprio usuário liberam o botão `Editar`, permitindo alterar dinamicamente o conteúdo, a URL ou o título. Dispara uma atividade `Update` para manter os seguidores federados sincronizados.
+*   **Exclusão:** Posts próprios exibem o botão `Excluir`. A remoção dispara um evento `Delete` que limpa o conteúdo localmente e propaga a exclusão para toda a rede de seguidores.
