@@ -1,0 +1,14 @@
+{
+  "name": "renanverse-frontend",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "dev:twitter": "npm run dev -w apps/twitter-web",
+    "dev:instagram": "npm run dev -w apps/instagram-web",
+    "dev:reddit": "npm run dev -w apps/reddit-web",
+    "build": "npm run build --workspaces --if-present"
+  }
+}
