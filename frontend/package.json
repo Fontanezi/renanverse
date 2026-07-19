@@ -5,6 +5,9 @@
     "packages/*",
     "apps/*"
   ],
+  "engines": {
+    "node": ">=20.19"
+  },
   "scripts": {
     "dev:twitter": "npm run dev -w apps/twitter-web",
     "dev:instagram": "npm run dev -w apps/instagram-web",

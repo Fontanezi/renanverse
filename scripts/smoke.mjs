@@ -130,21 +130,22 @@ const check = checker.check;
   const bobOut = ((await j(B, `/users/${bobId}/outbox`)).body || {}).orderedItems || [];
   const p1 = bobOut.find((x) => x.object && x.object.content === "P1");
   const p1Uri = p1 && p1.id;
-  const likeRes = await j(A, `/users/${aliceId}/likes`, "POST", { object: p1Uri });
-  const likeLocalId = likeRes.body && likeRes.body.id;
+  await j(A, `/users/${aliceId}/likes`, "POST", { object: p1Uri });
   await j(A, `/users/${aliceId}/announces`, "POST", { object: p1Uri });
   await wait(2500);
+  // Like nao entra no feed (por design); aparece na colecao /liked do autor.
+  const liked = ((await j(A, `/users/${aliceId}/liked`)).body || {}).orderedItems || [];
+  check("Like sobre objeto alvo: P1 aparece em /liked de alice", liked.some((x) => x.id === p1Uri), `liked=${liked.length}`);
+  // Announce (boost) aparece no feed do seguidor remoto (bob).
   const bobFeed = ((await j(B, `/users/${bobId}/feed`)).body || {}).orderedItems || [];
-  const likeItem = bobFeed.find((x) => x.type === "Like" && x.actor === alice.id);
   const annItem = bobFeed.find((x) => x.type === "Announce" && x.actor === alice.id);
-  check("Like cross-peer: bob ve o Like de alice sobre P1 (objeto alvo)", !!likeItem && likeItem.object && likeItem.object.object === p1Uri, likeItem && JSON.stringify(likeItem.object));
   check("Announce cross-peer: bob ve o boost de alice sobre P1", !!annItem);
 
-  // Undo{Like}.
-  await j(A, `/users/${aliceId}/activities/${likeLocalId}`, "DELETE");
-  await wait(2000);
-  const bobFeed2 = ((await j(B, `/users/${bobId}/feed`)).body || {}).orderedItems || [];
-  check("Undo{Like}: like some do feed de bob apos unlike", !bobFeed2.some((x) => x.type === "Like" && x.actor === alice.id));
+  // Undo{Like}: unlike (DELETE /likes {object}) remove P1 de /liked.
+  await j(A, `/users/${aliceId}/likes`, "DELETE", { object: p1Uri });
+  await wait(1500);
+  const liked2 = ((await j(A, `/users/${aliceId}/liked`)).body || {}).orderedItems || [];
+  check("Undo{Like}: P1 sai de /liked apos unlike", !liked2.some((x) => x.id === p1Uri));
 
   sa.close(); sc.close();
 

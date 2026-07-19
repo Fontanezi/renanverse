@@ -379,7 +379,11 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     recordLocalContent(db, wire);
     fanOutToFollowers(db, wire);
 
-    res.json({ updated: targetUri });
+    // Devolve o post ja atualizado (formato do feed) e avisa seguidores locais.
+    const updatedRow = db.prepare("SELECT * FROM activity WHERE id = ?").get(row.id) as ActivityRow;
+    const updatedAs2 = activityToAS2(BASE_URL, updatedRow, undefined, person.preferredUsername);
+    publishActivityToFollowers(db, config, actor, "feed:update", updatedAs2);
+    res.json(updatedAs2);
   });
 
   // DELETE /users/:id/activities/:activityId — remove uma Activity local:
@@ -402,6 +406,10 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     if (row.type === "Like" || row.type === "Announce") {
       fanOutToFollowers(db, buildUndo(db, actor, { type: row.type, id: targetUri }));
       db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
+      // Boost desfeito some do feed dos seguidores locais (Like nao aparece no feed).
+      if (row.type === "Announce") {
+        publishActivityToFollowers(db, config, actor, "feed:delete", { activityUri: targetUri });
+      }
       return res.json({ undone: targetUri, type: row.type });
     }
 
@@ -410,6 +418,8 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       recordLocalContent(db, wire);
       fanOutToFollowers(db, wire);
       db.prepare("DELETE FROM activity WHERE id = ?").run(row.id);
+      // Pub/Sub: remove o post do feed dos seguidores locais em tempo real.
+      publishActivityToFollowers(db, config, actor, "feed:delete", { activityUri: targetUri });
       return res.json({ deleted: targetUri, type: row.type });
     }
 

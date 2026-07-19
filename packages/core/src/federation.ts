@@ -13,6 +13,7 @@ import type { Database } from "better-sqlite3";
 import { ulid } from "ulid";
 import { buildSignatureHeaders } from "./httpsig";
 import { publishActivityToFollowers } from "./realtime";
+import { activityToAS2, type ActivityRow } from "./activitystreams";
 import type { PlatformConfig } from "./types";
 
 const MAX_ATTEMPTS = 10;
@@ -611,6 +612,10 @@ function handleUndo(db: Database, config: PlatformConfig, activity: any): Incomi
       inner.id ?? (typeof inner.object === "string" ? inner.object : undefined);
     if (!targetUri) return { status: "ignored", detail: `Undo{${inner.type}} sem id` };
     db.prepare("DELETE FROM activity WHERE uri = ?").run(targetUri);
+    // Pub/Sub: se era um boost (Announce), some do feed dos seguidores locais.
+    if (inner.type === "Announce") {
+      publishActivityToFollowers(db, config, activity.actor, "feed:delete", { activityUri: targetUri, actor: activity.actor });
+    }
     console.log(`[${config.peerId}] undo ${inner.type}: removida ${targetUri}`);
     return { status: "undo" };
   }
@@ -636,8 +641,13 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
       JSON.stringify(wire),
       object.id ?? activity.object?.id ?? activity.id
     );
-    // Pub/Sub: notifica os seguidores locais da edição.
-    publishActivityToFollowers(db, config, activity.actor, "feed:update", activity);
+    // Pub/Sub: emite o POST ja atualizado (id do post original, no mesmo formato
+    // do feed) para os seguidores locais reconciliarem a edicao.
+    const updatedUri = object.id ?? activity.object?.id ?? activity.id;
+    const updatedRow = db.prepare("SELECT * FROM activity WHERE uri = ?").get(updatedUri) as ActivityRow | undefined;
+    if (updatedRow) {
+      publishActivityToFollowers(db, config, activity.actor, "feed:update", activityToAS2(config.baseUrl, updatedRow));
+    }
     return;
   }
 
@@ -645,7 +655,7 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
     const targetUri = typeof object === "string" ? object : object.id ?? activity.id;
     db.prepare("DELETE FROM activity WHERE uri = ?").run(targetUri);
     // Pub/Sub: notifica os seguidores locais da remoção (tombstone).
-    publishActivityToFollowers(db, config, activity.actor, "feed:delete", { id: targetUri, actor: activity.actor });
+    publishActivityToFollowers(db, config, activity.actor, "feed:delete", { activityUri: targetUri, actor: activity.actor });
     return;
   }
 

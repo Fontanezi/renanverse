@@ -294,6 +294,53 @@ curl -s -X POST http://localhost:3001/users/${A##*/}/outbox \
 curl -s http://localhost:3002/users/${B##*/}/feed | jq
 ```
 
+## Interface web (frontend)
+
+Há um monorepo de frontend em `frontend/` (workspaces npm próprios, separados do
+backend), com um app React por plataforma e um pacote compartilhado.
+
+```
+frontend/
+  packages/shared/        # @renanverse-frontend/shared: api client, socket client,
+                          # hooks (useFeed/useSocket/useUser), componentes, tipos
+  apps/twitter-web/       # Vite :5173  ->  proxy p/ peer :3001
+  apps/instagram-web/     # Vite :5174  ->  proxy p/ peer :3002
+  apps/reddit-web/        # Vite :5175  ->  proxy p/ peer :3003
+```
+
+Cada app faz proxy de `/users`, `/.well-known` e `/socket.io` (WebSocket) para o
+peer backend correspondente (o client de API usa baseUrl vazio e passa pelo
+proxy do Vite). O "login" chama `POST /users` (cria um Person) e guarda no
+`localStorage`; o feed em tempo real usa Socket.io (`join` na room do usuário,
+eventos `feed:activity`/`feed:update`/`feed:delete`).
+
+### Requisito de Node
+
+O frontend usa Vite 8, que exige **Node 20.19+ (ou 22+)**. O backend roda em
+Node 18. Um `frontend/.tool-versions` fixa `node 22` para quem usa `mise`/`asdf`
+selecionar automaticamente naquele diretório; sem gerenciador de versão, use um
+Node 20.19+ ao instalar/rodar o frontend.
+
+### Como rodar (backend + frontend)
+
+```bash
+# 1) Backend (Node 18), um terminal por peer, na raiz do repo:
+npm install
+npm run dev:twitter     # :3001
+npm run dev:instagram   # :3002
+npm run dev:reddit      # :3003
+
+# 2) Frontend (Node 20.19+), dentro de frontend/:
+cd frontend
+npm install
+npm run dev:twitter     # http://localhost:5173  (fala com :3001)
+npm run dev:instagram   # http://localhost:5174  (fala com :3002)
+npm run dev:reddit      # http://localhost:5175  (fala com :3003)
+```
+
+Abra o app da plataforma no browser, entre com um usuário e o feed/pub-sub
+funcionam contra o peer.
+
 ## Testes de integração automatizados
 
 Dois roteiros em `scripts/` sobem a topologia inteira como processos filhos,
