@@ -445,13 +445,31 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
         const actor = actorUri(BASE_URL, person.id);
         const target = parsed.data.object;
         const wire =
-          kind === "Like" ? buildLike(db, actor, target) : buildAnnounce(db, actor, target);
+          kind === "Like"
+            ? buildLike(db, actor, target)
+            : buildAnnounce(db, actor, target, person.preferredUsername);
 
         // Registra local (entra no feed dos seguidores + catch-up) e federa.
         // O `localId` e a chave para desfazer depois (DELETE /activities/:id).
         const localId = recordLocalContent(db, wire, JSON.stringify({ object: target }));
         fanOutToFollowers(db, wire);
-        publishActivityToFollowers(db, config, actor, "feed:activity", wire.activity);
+
+        // Pub/Sub: um Announce vai para os seguidores locais JÁ resolvido (com
+        // o conteúdo do post original embutido, mesmo formato do feed) — o wire
+        // cru tem só a URI e renderizaria um card vazio até o próximo poll.
+        let payload: unknown = wire.activity;
+        if (kind === "Announce") {
+          const row = db.prepare("SELECT * FROM activity WHERE id = ?").get(localId) as
+            | ActivityRow
+            | undefined;
+          const original = db.prepare("SELECT * FROM activity WHERE uri = ?").get(target) as
+            | ActivityRow
+            | undefined;
+          if (row && original) {
+            payload = activityToAS2(BASE_URL, row, original, person.preferredUsername);
+          }
+        }
+        publishActivityToFollowers(db, config, actor, "feed:activity", payload);
 
         return res
           .status(201)
@@ -588,6 +606,19 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     res.json({ rejected: followerUri, removed: info.changes });
   });
 
+  // GET /activities/:activityId — devolve uma Activity guardada neste peer no
+  // formato AS2, pela sua URI canônica (`${BASE_URL}/activities/${id}`). Usado
+  // pelos outros peers para resolver o post original de um Announce que ainda
+  // não foi replicado até eles.
+  router.get("/activities/:activityId", (req, res) => {
+    const canonical = `${BASE_URL}/activities/${req.params.activityId}`;
+    const row = db
+      .prepare("SELECT * FROM activity WHERE uri = ? OR id = ?")
+      .get(canonical, req.params.activityId) as ActivityRow | undefined;
+    if (!row) return res.status(404).json({ error: "Activity não encontrada" });
+    res.json(activityToAS2(BASE_URL, row, undefined, actorNameFromRow(row)));
+  });
+
   // GET /catchup?since=N — anti-entropy: devolve os envelopes das Activities
   // autoradas por este peer (origin = baseUrl) com originSeq > since, para que
   // um peer que ficou para trás recupere o que perdeu (§6.10/§7.7).
@@ -608,7 +639,7 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     const rows = db
       .prepare(
         `SELECT * FROM activity
-           WHERE actorUri IN (SELECT followeeActorUri FROM follow WHERE followerActorUri = ?)
+           WHERE actorUri IN (SELECT followeeActorUri FROM follow WHERE followerActorUri = ? AND status = 'accepted')
              AND type NOT IN ('Update','Delete','Like')
            ORDER BY lamportClock ASC, published ASC`
       )
@@ -678,8 +709,53 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
     });
   });
 
-  // GET /users/:id/followers
-  router.get("/users/:id/followers", (req, res) => {
+  // Cache em memória de perfis de atores REMOTOS (nome legível de quem segue).
+  // Evita refazer o fetch do Person AS2 a cada listagem de followers.
+  const remoteActorProfileCache = new Map<
+    string,
+    { preferredUsername?: string; name?: string }
+  >();
+
+  /**
+   * Resolve o nome legível de um ator a partir da sua URI: local -> tabela
+   * person; remoto -> GET na própria actorUri (Person AS2), com cache e
+   * timeout. Em falha, devolve vazio (o cliente cai no fallback da URI).
+   */
+  async function resolveActorProfile(
+    uri: string
+  ): Promise<{ preferredUsername?: string; name?: string }> {
+    if (uri.startsWith(BASE_URL)) {
+      const pid = uri.split("/users/")[1];
+      const p = db
+        .prepare("SELECT preferredUsername, name FROM person WHERE id = ?")
+        .get(pid) as { preferredUsername: string; name: string } | undefined;
+      return p ?? {};
+    }
+    const cached = remoteActorProfileCache.get(uri);
+    if (cached) return cached;
+    try {
+      const res = await fetch(uri, {
+        headers: { Accept: "application/json" },
+        signal: AbortSignal.timeout(3000),
+      });
+      if (res.ok) {
+        const as2 = (await res.json()) as { preferredUsername?: string; name?: string };
+        const profile = {
+          preferredUsername: as2.preferredUsername,
+          name: as2.name,
+        };
+        remoteActorProfileCache.set(uri, profile);
+        return profile;
+      }
+    } catch {
+      /* peer indisponível: sem nome por enquanto, tenta de novo depois */
+    }
+    return {};
+  }
+
+  // GET /users/:id/followers — inclui o nome legível de cada seguidor
+  // (preferredUsername/name), resolvido localmente ou via fetch no peer remoto.
+  router.get("/users/:id/followers", async (req, res) => {
     const person = db
       .prepare("SELECT * FROM person WHERE id = ?")
       .get(req.params.id) as PersonRow | undefined;
@@ -690,11 +766,23 @@ export function createUsersRouter(db: Database, config: PlatformConfig): Router 
       .prepare("SELECT followerActorUri, status FROM follow WHERE followeeActorUri = ?")
       .all(uri) as { followerActorUri: string; status: string }[];
 
+    const items = await Promise.all(
+      rows.map(async (r) => {
+        const profile = await resolveActorProfile(r.followerActorUri);
+        return {
+          actorUri: r.followerActorUri,
+          status: r.status,
+          preferredUsername: profile.preferredUsername,
+          name: profile.name,
+        };
+      })
+    );
+
     res.json({
       "@context": "https://www.w3.org/ns/activitystreams",
       type: "Collection",
       totalItems: rows.length,
-      items: rows.map((r) => ({ actorUri: r.followerActorUri, status: r.status })),
+      items,
     });
   });
 

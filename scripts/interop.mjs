@@ -35,6 +35,12 @@ const check = checker.check;
   check("twitter segue reddit por handle (WebFinger)", f2.status === 201, `status=${f2.status}`);
   await wait(2000);
 
+  // Follows remotos ficam 'pending' ate o seguido aceitar; sem aceite, nada
+  // federa para o solicitante. ana e link aceitam joao antes de publicar.
+  await j(IG, `/users/${idOf(ana.id)}/followers/${encodeURIComponent(joao.id)}/accept`, "POST");
+  await j(RD, `/users/${idOf(link.id)}/followers/${encodeURIComponent(joao.id)}/accept`, "POST");
+  await wait(1500);
+
   // Instagram publica uma imagem; Reddit publica um post de texto (Page).
   await j(IG, `/users/${idOf(ana.id)}/outbox`, "POST", { type: "Create", attachmentUrl: "http://img.example/foto.jpg", content: "minha foto" });
   await j(RD, `/users/${idOf(link.id)}/outbox`, "POST", { type: "Create", objectType: "Page", title: "Meu post no reddit", content: "corpo do texto", community: "geral" });

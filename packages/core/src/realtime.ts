@@ -125,8 +125,10 @@ export function publishActivityToFollowers(
   payload: unknown
 ): void {
   if (!io) return;
+  // Somente seguidores ACEITOS: quem ainda está com a solicitação pendente não
+  // deve receber eventos do feed desse ator.
   const followers = db
-    .prepare("SELECT followerActorUri FROM follow WHERE followeeActorUri = ?")
+    .prepare("SELECT followerActorUri FROM follow WHERE followeeActorUri = ? AND status = 'accepted'")
     .all(actorUri) as { followerActorUri: string }[];
 
   const seen = new Set<string>();

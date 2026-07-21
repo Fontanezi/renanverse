@@ -73,6 +73,13 @@ const check = checker.check;
   await j(B, `/users/${bobId}/following`, "POST", { handle: "alice@localhost:3001" });
   await wait(2000);
 
+  // Follows remotos chegam como 'pending' no peer do seguido: sem o aceite,
+  // nada e entregue ao solicitante (solicitacao pendente nao da acesso aos
+  // posts). Aceita os dois lados antes de publicar conteudo.
+  await j(B, `/users/${bobId}/followers/${encodeURIComponent(alice.id)}/accept`, "POST");
+  await j(A, `/users/${aliceId}/followers/${encodeURIComponent(bob.id)}/accept`, "POST");
+  await wait(1500);
+
   // Pub/sub: sockets em A.
   const gotAlice = [], gotCarol = [];
   const sa = io(A, { transports: ["websocket"] });

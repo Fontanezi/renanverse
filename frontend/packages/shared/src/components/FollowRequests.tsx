@@ -9,6 +9,8 @@ interface FollowRequestsProps {
 interface FollowerItem {
   actorUri: string;
   status: string;
+  preferredUsername?: string;
+  name?: string;
 }
 
 export function FollowRequests({ api, userId }: FollowRequestsProps) {
@@ -70,9 +72,18 @@ export function FollowRequests({ api, userId }: FollowRequestsProps) {
           padding: "8px 0",
           borderBottom: "1px solid #f0f0f0",
         }}>
-          <span style={{ fontSize: "0.875rem", fontFamily: "monospace" }}>
-            @{r.actorUri.split("//")[1] || r.actorUri}
-          </span>
+          {r.preferredUsername ? (
+            <span style={{ fontSize: "0.875rem" }}>
+              <strong>@{r.preferredUsername}</strong>
+              {r.name && r.name !== r.preferredUsername && (
+                <span style={{ color: "#888" }}> · {r.name}</span>
+              )}
+            </span>
+          ) : (
+            <span style={{ fontSize: "0.875rem", fontFamily: "monospace" }}>
+              @{r.actorUri.split("//")[1] || r.actorUri}
+            </span>
+          )}
           <div style={{ display: "flex", gap: 8 }}>
             <button
               onClick={() => handleAccept(r.actorUri)}

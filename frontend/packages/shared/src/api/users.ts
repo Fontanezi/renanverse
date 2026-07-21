@@ -22,7 +22,14 @@ export function createUserApi(api: RawClient) {
       api.get<{ items: string[] }>(`/users/${userId}/following`),
 
     getFollowers: (userId: string) =>
-      api.get<{ items: { actorUri: string; status: string }[] }>(`/users/${userId}/followers`),
+      api.get<{
+        items: {
+          actorUri: string;
+          status: string;
+          preferredUsername?: string;
+          name?: string;
+        }[];
+      }>(`/users/${userId}/followers`),
 
     acceptFollower: (userId: string, actorUri: string) =>
       api.post<{ status: string }>(`/users/${userId}/followers/${encodeURIComponent(actorUri)}/accept`),

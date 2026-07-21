@@ -294,8 +294,10 @@ export function fanOutToFollowers(db: Database, wire: Wire): void {
   const actorUri = wire.activity.actor as string;
   const targets = new Set<string>();
 
+  // Apenas seguidores ACEITOS recebem o conteúdo — uma solicitação pendente
+  // não dá acesso às postagens do ator (privacidade do follow request).
   const followers = db
-    .prepare("SELECT followerActorUri FROM follow WHERE followeeActorUri = ?")
+    .prepare("SELECT followerActorUri FROM follow WHERE followeeActorUri = ? AND status = 'accepted'")
     .all(actorUri) as { followerActorUri: string }[];
   for (const f of followers) targets.add(inboxUrlForActor(f.followerActorUri));
 
@@ -383,13 +385,21 @@ export function buildLike(db: Database, actorUri: string, targetUri: string): Wi
   return wrapContent(db, activity);
 }
 
-/** Constrói um `Announce` (boost/repost) sobre o objeto `targetUri`. */
-export function buildAnnounce(db: Database, actorUri: string, targetUri: string): Wire {
+/** Constrói um `Announce` (boost/repost) sobre o objeto `targetUri`. O
+ *  `actorName` (nome legível de quem compartilha) viaja no wire para os peers
+ *  destino exibirem o repost sem precisar resolver a URI do ator. */
+export function buildAnnounce(
+  db: Database,
+  actorUri: string,
+  targetUri: string,
+  actorName?: string
+): Wire {
   const activity = {
     "@context": ["https://www.w3.org/ns/activitystreams"],
     id: `${actorUri}/announces/${ulid()}`,
     type: "Announce",
     actor: actorUri,
+    actorName,
     object: targetUri,
   };
   return wrapContent(db, activity);
@@ -687,7 +697,112 @@ function applyContent(db: Database, config: PlatformConfig, wire: Wire): void {
   );
 
   // Pub/Sub: entrega em tempo real ao feed dos seguidores locais deste ator.
+  // Announce precisa ser RESOLVIDO antes (objeto = URI do post original);
+  // publicar o wire cru deixaria um card vazio no cliente até o próximo poll.
+  if (activity.type === "Announce" && isRef) {
+    publishResolvedAnnounce(db, config, activity.id as string, object as string);
+    return;
+  }
   publishActivityToFollowers(db, config, activity.actor, "feed:activity", activity);
+}
+
+/** Nome legível do ator gravado no envelope (raw) de uma linha da activity. */
+function actorNameFromRaw(row: ActivityRow): string | undefined {
+  try {
+    const parsed = JSON.parse(row.raw) as { activity?: { actorName?: string } };
+    return parsed?.activity?.actorName;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Publica um Announce aos seguidores locais JÁ no formato do feed (objeto do
+ * post original embutido + `repostOf`). Se o post original ainda não existe
+ * neste peer, busca-o na origem (GET na própria URI da Activity) de forma
+ * assíncrona e publica quando chegar — o cliente nunca vê o card vazio "@?".
+ */
+function publishResolvedAnnounce(
+  db: Database,
+  config: PlatformConfig,
+  announceUri: string,
+  objectUri: string
+): void {
+  const announceRow = db
+    .prepare("SELECT * FROM activity WHERE uri = ?")
+    .get(announceUri) as ActivityRow | undefined;
+  if (!announceRow) return;
+
+  const publish = (original: ActivityRow) => {
+    publishActivityToFollowers(
+      db,
+      config,
+      announceRow.actorUri,
+      "feed:activity",
+      activityToAS2(config.baseUrl, announceRow, original, actorNameFromRaw(announceRow))
+    );
+  };
+
+  const original = db
+    .prepare("SELECT * FROM activity WHERE uri = ?")
+    .get(objectUri) as ActivityRow | undefined;
+  if (original) {
+    publish(original);
+    return;
+  }
+
+  void fetchRemoteActivity(db, objectUri).then((fetched) => {
+    if (fetched) publish(fetched);
+  });
+}
+
+/**
+ * Busca uma Activity remota pela sua URI canônica (servida pelo endpoint
+ * GET /activities/:id do peer de origem) e a guarda localmente como linha
+ * remota. Idempotente (INSERT OR IGNORE pela uri única); não mexe no vclock —
+ * quando o wire "de verdade" chegar pela federação, é deduplicado pela uri.
+ */
+export async function fetchRemoteActivity(
+  db: Database,
+  uri: string
+): Promise<ActivityRow | undefined> {
+  try {
+    const res = await fetch(uri, {
+      headers: { Accept: "application/json" },
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!res.ok) return undefined;
+    const as2 = (await res.json()) as any;
+    if (!as2 || typeof as2.id !== "string" || typeof as2.actor !== "string") return undefined;
+
+    const object = as2.object ?? {};
+    db.prepare(
+      `INSERT OR IGNORE INTO activity
+         (id, uri, type, actorUri, objectType, content, attachmentUrl, meta, inReplyTo, lamportClock, isLocal, origin, originSeq, published, raw, authorId)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, NULL, ?, ?, NULL)`
+    ).run(
+      ulid(),
+      as2.id,
+      as2.type ?? "Create",
+      as2.actor,
+      object.type ?? "Note",
+      object.content ?? null,
+      object.attachment ?? null,
+      extractMeta(object),
+      object.inReplyTo ?? null,
+      observeLamport(db, 0),
+      originOf(as2.actor),
+      as2.published ?? new Date().toISOString(),
+      // Guarda como { activity } (sem _meta): o catch-up ignora, mas o nome do
+      // ator continua recuperável pelo mesmo caminho do wire federado.
+      JSON.stringify({ activity: as2 })
+    );
+    return db.prepare("SELECT * FROM activity WHERE uri = ?").get(as2.id) as
+      | ActivityRow
+      | undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -752,7 +867,7 @@ export function catchupSince(db: Database, origin: string, since: number): Wire[
 export async function runAntiEntropy(db: Database, config: PlatformConfig): Promise<void> {
   const self = config.baseUrl;
   const followees = db
-    .prepare("SELECT DISTINCT followeeActorUri FROM follow")
+    .prepare("SELECT DISTINCT followeeActorUri FROM follow WHERE status = 'accepted'")
     .all() as { followeeActorUri: string }[];
 
   const origins = new Set<string>();
